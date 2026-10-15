@@ -1,3 +1,9 @@
+# Liszt
+
+A personal terminal that runs Claude Code sessions in project tabs and split panes.
+Electron + xterm.js + node-pty. Every pane runs the real `claude` CLI; status comes from Claude
+Code hooks.
+
 ```
 
                                      ..:!!!+sohoo@@CCCv.
@@ -41,12 +47,6 @@
 ```
 
 <sub>Franz Liszt, photographed by Nadar in 1886 · Listen: [Hungarian Rhapsody No. 2](https://www.youtube.com/watch?v=E9S2CfDwNAg), played by György Cziffra</sub>
-
-# Liszt
-
-A personal terminal that runs Claude Code sessions in project tabs and split panes.
-Electron + xterm.js + node-pty. Every pane runs the real `claude` CLI; status comes from Claude
-Code hooks.
 
 ## Running
 
