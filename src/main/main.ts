@@ -11,14 +11,12 @@ import type {
   AgentSession,
   AppSession,
   AppState,
+  BackgroundTask,
   GitInfo,
   GitResult,
   HookEvent,
   ProjectIcon,
   ProjectKind,
-  ProjectMenuOptions,
-  SessionMenuOptions,
-  SessionRowMenuOptions,
   SpawnOptions,
   SpawnResult,
   WorktreeResult,
@@ -31,7 +29,6 @@ const userData = () => app.getPath('userData');
 const statePath = () => path.join(userData(), 'state.json');
 
 let win: BrowserWindow | null = null;
-let settingsFile = '';
 const ptys = new Map<string, pty.IPty>();
 
 function send(channel: string, ...args: unknown[]) {
@@ -82,12 +79,41 @@ function readShellEnv(): Promise<ShellEnv> {
 const shellEnv = readShellEnv();
 
 // --- Claude Code hooks -------------------------------------------------------------------------
-// Each claude pane is started with `--settings <file>` holding these hooks. Every hook posts its
-// JSON payload to a loopback server, tagged with the pane id from the pane's environment; a random
-// token keeps other local processes from faking events. The output is discarded so nothing leaks
+// Each claude pane is started with `--settings <json>` holding these hooks, with the pane id written
+// into the command: Claude Code's background server runs every session with the environment the
+// server itself started with, so a pane's environment never reaches its session. Every hook posts
+// its JSON payload to a loopback server whose address it reads from a file when it fires, so a
+// session started before Liszt last quit reports to the Liszt running now. A random token in that
+// address keeps other local processes from faking events. The output is discarded so nothing leaks
 // into Claude's context, and a failure never blocks Claude.
 
-function writeClaudeSettings(): string {
+const hookUrlFile = () => path.join(userData(), 'hook-url');
+const shellQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+
+function hookSettings(paneId: string): string {
+  const command =
+    `curl -s -m 2 --noproxy '*' -H 'Content-Type: application/json' ` +
+    `--data-binary @- "$(cat ${shellQuote(hookUrlFile())} 2>/dev/null)&pane=${paneId}" >/dev/null 2>&1 || true`;
+  const entry = [{ hooks: [{ type: 'command', command }] }];
+  const toolEntry = [{ matcher: '*', hooks: [{ type: 'command', command }] }];
+  return JSON.stringify({
+    hooks: {
+      SessionStart: entry,
+      UserPromptSubmit: entry,
+      Notification: entry,
+      Stop: entry,
+      SessionEnd: entry,
+      PostToolUse: toolEntry,
+    },
+  });
+}
+
+/**
+ * The settings file earlier versions started panes with. Background sessions made from those panes
+ * name it in the flags Claude Code wakes them with, so it stays; its hooks read a pane id and an
+ * address from an environment the background server does not have, and send nothing.
+ */
+function writeClaudeSettings() {
   const command =
     `curl -s -m 2 --noproxy '*' -H 'Content-Type: application/json' ` +
     `--data-binary @- "$LISZT_HOOK_URL&pane=$LISZT_PANE_ID" >/dev/null 2>&1 || true`;
@@ -103,9 +129,7 @@ function writeClaudeSettings(): string {
       PostToolUse: toolEntry,
     },
   };
-  const file = path.join(userData(), 'claude-settings.json');
-  fs.writeFileSync(file, JSON.stringify(settings, null, 2));
-  return file;
+  fs.writeFileSync(path.join(userData(), 'claude-settings.json'), JSON.stringify(settings, null, 2));
 }
 
 function startHookServer(): Promise<string> {
@@ -135,6 +159,7 @@ function startHookServer(): Promise<string> {
         message: str('message'),
         tool: str('tool_name'),
         detail: toolDetail(payload.tool_input),
+        tasks: runningTasks(payload.background_tasks),
       };
       if (process.env.LISZT_DEBUG) console.log('[hook]', paneId, ev.event, ev.source ?? '');
       send('hook', ev);
@@ -144,13 +169,33 @@ function startHookServer(): Promise<string> {
     server.listen(0, '127.0.0.1', () => {
       const { port } = server.address() as { port: number };
       const url = `http://127.0.0.1:${port}/hook?token=${token}`;
-      if (process.env.LISZT_DEBUG) fs.writeFileSync(path.join(userData(), 'hook-url.txt'), url);
+      // Only this user may read the token.
+      fs.writeFileSync(hookUrlFile(), url, { mode: 0o600 });
+      fs.chmodSync(hookUrlFile(), 0o600);
       resolve(url);
     });
   });
 }
 
 let hookUrl: Promise<string> = new Promise(() => {});
+
+/**
+ * The background tasks a Stop hook lists as still going. Claude ended its turn but starts another
+ * when each one finishes, so the session is not done yet.
+ */
+function runningTasks(raw: unknown): BackgroundTask[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const tasks: BackgroundTask[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const fields = item as Record<string, unknown>;
+    if (fields.status !== 'running' && fields.status !== 'pending') continue;
+    const str = (k: string) => (typeof fields[k] === 'string' ? (fields[k] as string) : '');
+    const label = str('description') || str('command').split('\n')[0] || 'Background task';
+    tasks.push({ type: str('type'), label: label.slice(0, 80) });
+  }
+  return tasks;
+}
 
 /** What a tool call touched, short enough for one line: a file name, a command, a pattern. */
 function toolDetail(input: unknown): string | undefined {
@@ -164,13 +209,55 @@ function toolDetail(input: unknown): string | undefined {
 }
 
 // --- Terminals ---------------------------------------------------------------------------------
+// A Claude pane runs a Claude Code background session: `claude --bg` starts it on Claude Code's
+// background server and the pane's terminal runs `claude attach` on it. Quitting Liszt ends only the
+// attach, so the session keeps working, and the pane attaches to it again on the next start. Where
+// no background session can start (Claude Code refuses folders it does not trust yet) the pane runs
+// claude itself, which asks about trust and ends with the app.
 
 const ANSI = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g;
 const BACKGROUNDED = /backgrounded\W+([0-9a-f]{8})\b/;
+// Pane ids are written into hook commands.
+const PANE_ID = /^[\w-]+$/;
+
+// Bumped by every spawn and kill, so a start that waited on claude can tell its pane was closed or restarted.
+const spawnSeq = new Map<string, number>();
+function nextSpawn(paneId: string): number {
+  const n = (spawnSeq.get(paneId) ?? 0) + 1;
+  spawnSeq.set(paneId, n);
+  return n;
+}
+
+/** Starts a background session for a pane; null when Claude Code would not. */
+async function startBackground(o: SpawnOptions, resume: boolean, sessionId: string, cwd: string): Promise<{ bgId: string; sessionId: string } | null> {
+  const args = ['--bg', '--settings', hookSettings(o.paneId)];
+  // A resumed session keeps its id.
+  if (resume) args.push('--resume', sessionId);
+  // `--` keeps a prompt that starts with a dash from being read as an option.
+  else if (o.prompt) args.push('--', o.prompt);
+  let out: string;
+  try {
+    // The first one also starts the background server, which can take a while.
+    out = await runClaude(args, 30_000, cwd);
+  } catch (err) {
+    if (process.env.LISZT_DEBUG) console.log('[bg] not started:', errorText(err));
+    return null;
+  }
+  const bgId = BACKGROUNDED.exec(out.replace(ANSI, ''))?.[1];
+  if (!bgId) return null;
+  // Claude Code picks the id of a new session, and of a copy when the resumed one runs elsewhere.
+  const job = await readJson(path.join(await claudeDir(), 'jobs', bgId, 'state.json'));
+  const listed = (job as { sessionId?: unknown } | undefined)?.sessionId;
+  const id = typeof listed === 'string' ? listed : (await listAgents())?.find((a) => a.id === bgId)?.sessionId;
+  return { bgId, sessionId: id ?? sessionId };
+}
 
 ipcMain.handle('pty:spawn', async (_e, o: SpawnOptions): Promise<SpawnResult> => {
+  if (!PANE_ID.test(o.paneId)) return { ok: false, error: `Not a pane id: ${o.paneId}` };
+  const seq = nextSpawn(o.paneId);
   const { env, claude } = await shellEnv;
-  const hook = await hookUrl;
+  // The hooks read the server's address from its file, so a session must not start before it is written.
+  await hookUrl;
   const old = ptys.get(o.paneId);
   ptys.delete(o.paneId);
   old?.kill();
@@ -180,39 +267,50 @@ ipcMain.handle('pty:spawn', async (_e, o: SpawnOptions): Promise<SpawnResult> =>
     TERM: 'xterm-256color',
     COLORTERM: 'truecolor',
     TERM_PROGRAM: 'Liszt',
-    LISZT_PANE_ID: o.paneId,
-    LISZT_HOOK_URL: hook,
   };
   paneEnv.LANG ||= 'en_US.UTF-8';
+  const cwd = fs.existsSync(o.cwd) ? o.cwd : os.homedir();
 
   // A background session is attached while Claude Code still knows it, even done or stopped:
   // attach wakes it on the conversation it last had, whereas the listed session id is the one it
   // started with, from before any /clear. Once it is removed it is resumed by session id.
-  const attach =
+  let bgId =
     o.kind === 'claude' && o.attach && (await listAgents())?.some((a) => a.kind === 'background' && a.id === o.attach)
       ? o.attach
       : undefined;
   // Claude cleans up old transcripts; resuming one that is gone lands in its session picker, so
   // start a new session instead.
   let { resume, sessionId } = o;
-  if (!attach && resume && o.transcript && !fs.existsSync(o.transcript)) {
+  if (!bgId && resume && o.transcript && !fs.existsSync(o.transcript)) {
     resume = false;
     sessionId = randomUUID();
   }
+  // Started here, so stopped again if the pane goes away before it is attached.
+  let started: string | undefined;
+  if (o.kind === 'claude' && !bgId) {
+    const bg = await startBackground(o, resume, sessionId, cwd);
+    if (bg) ({ bgId, sessionId } = bg);
+    started = bg?.bgId;
+  }
+  const abandon = async (error: string): Promise<SpawnResult> => {
+    if (started) await runClaude(['stop', started]).catch(() => {});
+    return { ok: false, error };
+  };
+  if (spawnSeq.get(o.paneId) !== seq) return abandon('The pane was closed or restarted while it started.');
 
   const [file, args] =
-    o.kind === 'claude'
-      ? [claude, attach ? ['attach', attach] : ['--settings', settingsFile, resume ? '--resume' : '--session-id', sessionId]]
-      : [env.SHELL || '/bin/zsh', ['-l']];
-  // `--` keeps a prompt that starts with a dash from being read as an option.
-  if (o.kind === 'claude' && o.prompt && !resume && !attach) args.push('--', o.prompt);
-  const cwd = fs.existsSync(o.cwd) ? o.cwd : os.homedir();
+    o.kind !== 'claude'
+      ? [env.SHELL || '/bin/zsh', ['-l']]
+      : bgId
+        ? [claude, ['attach', bgId]]
+        : [claude, ['--settings', hookSettings(o.paneId), resume ? '--resume' : '--session-id', sessionId]];
+  if (o.kind === 'claude' && !bgId && o.prompt && !resume) args.push('--', o.prompt);
 
   let p: pty.IPty;
   try {
     p = pty.spawn(file, args, { name: 'xterm-256color', cols: o.cols, rows: o.rows, cwd, env: paneEnv });
   } catch (err) {
-    return { ok: false, error: String(err) };
+    return abandon(String(err));
   }
   ptys.set(o.paneId, p);
   // `/background` hands the conversation to Claude Code's background server under a new session id
@@ -222,7 +320,7 @@ ipcMain.handle('pty:spawn', async (_e, o: SpawnOptions): Promise<SpawnResult> =>
   p.onData((data) => {
     if (ptys.get(o.paneId) !== p) return;
     send('pty:data', o.paneId, data);
-    if (o.kind !== 'claude' || attach) return;
+    if (o.kind !== 'claude' || bgId) return;
     tail = (tail + data.replace(ANSI, '')).slice(-300);
     const m = BACKGROUNDED.exec(tail);
     if (!m) return;
@@ -234,7 +332,7 @@ ipcMain.handle('pty:spawn', async (_e, o: SpawnOptions): Promise<SpawnResult> =>
     ptys.delete(o.paneId);
     send('pty:exit', o.paneId, exitCode);
   });
-  return { ok: true, sessionId, resumed: resume, attached: Boolean(attach) };
+  return { ok: true, sessionId, resumed: resume, bgId };
 });
 
 ipcMain.on('pty:write', (_e, id: string, data: string) => ptys.get(id)?.write(data));
@@ -248,6 +346,7 @@ ipcMain.on('pty:resize', (_e, id: string, cols: number, rows: number) => {
 });
 
 ipcMain.on('pty:kill', (_e, id: string) => {
+  nextSpawn(id);
   const p = ptys.get(id);
   ptys.delete(id);
   p?.kill();
@@ -466,10 +565,10 @@ ipcMain.on('agents:stop', async (_e, sessionId: string, bgId?: string) => {
 
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f-]{27}$/i;
 
-async function runClaude(args: string[], timeout = 15_000): Promise<string> {
+async function runClaude(args: string[], timeout = 15_000, cwd?: string): Promise<string> {
   const { env, claude } = await shellEnv;
   return new Promise((resolve, reject) =>
-    execFile(claude, args, { env, encoding: 'utf8', timeout }, (err, out, stderr) =>
+    execFile(claude, args, { env, cwd, encoding: 'utf8', timeout }, (err, out, stderr) =>
       err ? reject(new Error(stderr.trim() || out.trim() || err.message)) : resolve(out),
     ),
   );
@@ -797,63 +896,6 @@ ipcMain.handle('dialog:pickIcon', async () => {
   return r.canceled || !r.filePaths[0] ? null : loadIcon(r.filePaths[0]) ?? null;
 });
 
-ipcMain.handle('menu:project', (_e, o: ProjectMenuOptions) => {
-  return new Promise<string | null>((resolve) => {
-    const item = (label: string, id: string, enabled = true): MenuItemConstructorOptions => ({ label, enabled, click: () => resolve(id) });
-    const template: MenuItemConstructorOptions[] = [item('Rename…', 'rename')];
-    if (o.renamed) template.push(item('Use Folder Name', 'reset-name'));
-    template.push(
-      { type: 'separator' },
-      item(o.folded ? 'Unfold' : 'Fold', 'fold'),
-      item('Fold Others', 'fold-others', o.othersUnfolded),
-      item('Unfold All', 'unfold-all', o.anyFolded),
-      { type: 'separator' },
-      item('Choose Icon…', 'icon-choose'),
-      item('Detect Icon Again', 'icon-detect'),
-      { type: 'separator' },
-      item('Reveal in Finder', 'reveal'),
-      { type: 'separator' },
-      item('Close Project', 'close'),
-    );
-    Menu.buildFromTemplate(template).popup({ window: win!, callback: () => setTimeout(() => resolve(null), 100) });
-  });
-});
-
-ipcMain.handle('menu:session', (_e, o: SessionMenuOptions) => {
-  return new Promise<string | null>((resolve) => {
-    const item = (label: string, id: string, enabled = true): MenuItemConstructorOptions => ({ label, enabled, click: () => resolve(id) });
-    const template: MenuItemConstructorOptions[] = [item('Rename…', 'rename')];
-    if (o.renamed) template.push(item('Use Automatic Name', 'reset-name'));
-    template.push(
-      item(o.unread ? 'Mark as Read' : 'Mark as Unread', 'unread'),
-      { type: 'separator' },
-      item('Split Right', 'split-right', o.canSplit),
-      item('Split Down', 'split-down', o.canSplit),
-      item('Take Out of Split', 'unsplit', o.inSplit),
-      { type: 'separator' },
-      item('Reveal in Finder', 'reveal'),
-    );
-    if (o.claude) template.push(item('Copy Session ID', 'copy-id', o.started));
-    template.push({ type: 'separator' }, item('Close Session', 'close'), item('Close Other Sessions', 'close-others', o.others));
-    Menu.buildFromTemplate(template).popup({ window: win!, callback: () => setTimeout(() => resolve(null), 100) });
-  });
-});
-
-ipcMain.handle('menu:session-row', (_e, o: SessionRowMenuOptions) => {
-  return new Promise<string | null>((resolve) => {
-    const item = (label: string, id: string, enabled = true): MenuItemConstructorOptions => ({ label, enabled, click: () => resolve(id) });
-    const template: MenuItemConstructorOptions[] = [
-      item(o.inLiszt ? 'Show Session' : 'Open in Liszt', 'open', o.canOpen),
-      { type: 'separator' },
-      item('Close Session', 'close', o.canClose),
-      o.archived ? item('Unarchive', 'unarchive') : item(o.canClose ? 'Close and Archive' : 'Archive', 'archive'),
-      { type: 'separator' },
-      item('Delete Session…', 'delete'),
-    ];
-    Menu.buildFromTemplate(template).popup({ window: win!, callback: () => setTimeout(() => resolve(null), 100) });
-  });
-});
-
 ipcMain.on('shell:reveal', (_e, dir: string) => shell.showItemInFolder(dir));
 ipcMain.on('clipboard:write', (_e, text: string) => clipboard.writeText(text));
 
@@ -962,17 +1004,20 @@ app.on('second-instance', () => {
 
 app.whenReady().then(() => {
   fs.mkdirSync(userData(), { recursive: true });
-  settingsFile = writeClaudeSettings();
+  writeClaudeSettings();
   hookUrl = startHookServer();
   buildMenu();
   createWindow();
   setInterval(() => void pollAgents(), AGENTS_INTERVAL);
 });
 
-// Quitting leaves background sessions running: the panes resume them on the next start.
+// Quitting ends the panes' terminals. A Claude pane's terminal only attaches to its background
+// session, which keeps working and is attached again on the next start; shells and panes that run
+// claude themselves end here. Hooks fired meanwhile find no address and send nothing.
 app.on('before-quit', () => {
   for (const p of ptys.values()) p.kill();
   ptys.clear();
+  fs.rmSync(hookUrlFile(), { force: true });
 });
 
 app.on('window-all-closed', () => app.quit());

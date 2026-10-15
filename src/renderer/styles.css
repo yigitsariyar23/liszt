@@ -4,6 +4,7 @@
   --panel: #111113;
   --panel-2: #18181b;
   --tab-active: #1d1d22;
+  --menu: #1a1a1e;
   --border: #25252a;
   --border-strong: #35353c;
   --text: #d8d8dc;
@@ -97,6 +98,12 @@ body.resizing-row * {
   background: var(--accent);
 }
 
+/* Claude's turn is over but its background commands still run; it goes on when they end. */
+.dot.waiting {
+  border-color: var(--yellow);
+  animation: pulse 2.4s ease-in-out infinite;
+}
+
 .dot.exited {
   border-color: var(--red);
 }
@@ -173,6 +180,8 @@ body.resizing-row * {
 
 /* The open stack stands on the line above the session bar, marked like the active session tab. */
 .tab.active {
+  position: relative;
+  z-index: 1;
   align-self: flex-end;
   height: 34px;
   padding-bottom: 4px;
@@ -266,6 +275,100 @@ body.resizing-row * {
 
 .tab-close:hover {
   color: var(--text);
+}
+
+/* Project groups: a tab in the group's colour leads its projects, which are underlined in it. The
+   open project's tab stands over the line. */
+.tgroup {
+  position: relative;
+  flex: none;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.tgroup::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  bottom: 2px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--group);
+  opacity: 0.8;
+  pointer-events: none;
+}
+
+.tgroup.collapsed:not(:has(.tab))::after {
+  display: none;
+}
+
+.tgroup + .tab,
+.tab + .tgroup,
+.tgroup + .tgroup {
+  margin-left: 6px;
+}
+
+.tgroup.dragging {
+  opacity: 0.4;
+}
+
+.tgroup-chip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  min-width: 14px;
+  margin-right: 2px;
+  padding: 0 7px;
+  border-radius: 6px;
+  background: var(--group);
+  color: #111113;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.tgroup-chip:hover {
+  filter: brightness(1.12);
+}
+
+.tgroup-chip.drop-before {
+  box-shadow: -3px 0 0 var(--accent);
+}
+
+.tgroup-chip.drop-after {
+  box-shadow: 3px 0 0 var(--accent);
+}
+
+/* An unnamed group is a plain colour pill. */
+.tgroup-name:empty:not([contenteditable='true']) {
+  display: none;
+}
+
+.tgroup-name[contenteditable='true'] {
+  min-width: 48px;
+  padding: 0 3px;
+  border-radius: 3px;
+  outline: 1px solid #111113;
+  user-select: text;
+  cursor: text;
+}
+
+.tgroup-count {
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 14px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+/* What the projects hidden in a collapsed group are doing. */
+.tgroup > .dot {
+  margin: 0 4px 0 2px;
 }
 
 .drag-space {
@@ -800,6 +903,15 @@ body[data-side='sessions'] #sessions-view {
   background: var(--accent);
 }
 
+.chip.waiting {
+  color: var(--yellow);
+}
+
+.chip.waiting::before {
+  background: var(--yellow);
+  animation: pulse 2.4s ease-in-out infinite;
+}
+
 .chip.exited {
   color: var(--red);
 }
@@ -1013,7 +1125,6 @@ body.no-tasks #tasks {
   color: #160b06;
 }
 
-select,
 input,
 textarea {
   font: inherit;
@@ -1023,9 +1134,38 @@ textarea {
   border-radius: 6px;
 }
 
-select {
+/* Opens an in-app list in place of a native <select>. */
+.dropdown {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
   margin-left: 4px;
-  padding: 1px 4px;
+  padding: 0 5px 0 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  vertical-align: middle;
+}
+
+.dropdown:hover {
+  border-color: var(--faint);
+}
+
+.dropdown.open,
+.dropdown:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.dropdown-arrow {
+  color: var(--muted);
+}
+
+.dropdown-arrow svg {
+  width: 9px;
+  height: 9px;
 }
 
 #task-input {
@@ -1246,7 +1386,8 @@ button.task-section-head:hover {
 }
 
 .srow.running .srow-activity,
-.srow.attention .srow-activity {
+.srow.attention .srow-activity,
+.srow.waiting .srow-activity {
   color: var(--muted);
 }
 
@@ -1342,4 +1483,118 @@ button.task-section-head:hover {
 
 .srow.gone .srow-title {
   color: var(--faint);
+}
+
+/* In-app menus: right-click menus and dropdown lists ------------------------------------------ */
+
+/* Takes the clicks around an open menu, so one outside only closes it. */
+.menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  -webkit-app-region: no-drag;
+}
+
+.menu {
+  position: fixed;
+  min-width: 180px;
+  max-width: 340px;
+  max-height: calc(100vh - 12px);
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  background: var(--menu);
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.5),
+    0 2px 8px rgba(0, 0, 0, 0.35);
+  user-select: none;
+  cursor: default;
+  scrollbar-width: thin;
+  -webkit-app-region: no-drag;
+  animation: menu-in 0.08s ease-out;
+}
+
+@keyframes menu-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 5px;
+  white-space: nowrap;
+}
+
+.menu.checks .menu-item {
+  padding-left: 6px;
+}
+
+.menu-item.active {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.menu-item.disabled {
+  color: var(--faint);
+}
+
+.menu-item.danger {
+  color: var(--red);
+}
+
+.menu-item.danger.active {
+  background: color-mix(in srgb, var(--red) 22%, transparent);
+}
+
+.menu-check {
+  display: none;
+  flex: none;
+  width: 13px;
+  color: var(--accent);
+}
+
+.menu.checks .menu-check {
+  display: grid;
+  place-items: center;
+}
+
+.menu-check svg {
+  width: 12px;
+  height: 12px;
+}
+
+.menu-swatch {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.menu-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.menu-arrow {
+  flex: none;
+  margin-right: -4px;
+  color: var(--muted);
+}
+
+.menu-arrow svg {
+  width: 10px;
+  height: 10px;
+}
+
+.menu-sep {
+  height: 1px;
+  margin: 4px 8px;
+  background: var(--border);
 }

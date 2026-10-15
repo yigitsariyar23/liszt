@@ -23,6 +23,11 @@ export interface PaneState {
   bgId?: string;
   /** Claude finished a turn while the user was elsewhere, or the user marked the session unread. */
   unread?: boolean;
+  /**
+   * Claude had work under way when Liszt last saw it. A background session keeps going after Liszt
+   * quits; found idle on the next start, it finished meanwhile and its reply is unread.
+   */
+  working?: boolean;
 }
 
 export type TaskStatus = 'todo' | 'doing' | 'review' | 'done';
@@ -61,42 +66,16 @@ export interface ProjectIcon {
   custom?: boolean;
 }
 
-/** What a session's right-click menu offers; main builds the menu from it. */
-export interface SessionMenuOptions {
-  claude: boolean;
-  /** Named by the user, so it can go back to the automatic title. */
-  renamed: boolean;
-  /** Can be tiled next to the focused session. */
-  canSplit: boolean;
-  /** Shares the stage with other tiles. */
-  inSplit: boolean;
-  /** Has a transcript, so its session id can be resumed elsewhere. */
-  started: boolean;
-  /** The project has other sessions. */
-  others: boolean;
-  unread: boolean;
-}
+export type GroupColor = 'grey' | 'blue' | 'green' | 'yellow' | 'orange' | 'red' | 'pink' | 'purple' | 'cyan';
 
-/** What a Sessions panel row's right-click menu offers. */
-export interface SessionRowMenuOptions {
-  /** Sits in a Liszt pane, so the first item shows it instead of opening it. */
-  inLiszt: boolean;
-  /** False when its folder or its conversation is gone. */
-  canOpen: boolean;
-  /** Runs somewhere, or sits in a Liszt pane, so there is something to close. */
-  canClose: boolean;
-  archived: boolean;
-}
-
-/** What a project tab's right-click menu offers. */
-export interface ProjectMenuOptions {
-  /** Named by the user, so it can go back to the folder name. */
-  renamed: boolean;
-  folded: boolean;
-  /** Some other project tab is still unfolded. */
-  othersUnfolded: boolean;
-  /** Some project tab is folded. */
-  anyFolded: boolean;
+/** A named run of project tabs in the top bar, like a browser's tab group. */
+export interface ProjectGroup {
+  id: string;
+  /** May be empty; the group's tab then shows only its colour. */
+  name: string;
+  color: GroupColor;
+  /** Only the group's tab shows, plus the open project when it is one of the group's. */
+  collapsed?: boolean;
 }
 
 /** How a project's visible sessions are tiled: a tree of splits with session panes as leaves. */
@@ -116,6 +95,8 @@ export interface ProjectState {
   icon?: ProjectIcon;
   /** The tab shows only its icon and status. */
   folded?: boolean;
+  /** Its group's projects always sit next to each other in `AppState.projects`. */
+  groupId?: string;
   tasks: TaskState[];
   autopilot: AutopilotState;
 }
@@ -123,6 +104,8 @@ export interface ProjectState {
 export interface AppState {
   version: 1;
   projects: ProjectState[];
+  /** Project tab groups; they are ordered by where their projects sit. */
+  groups: ProjectGroup[];
   activeProjectId: string | null;
   /** What the left panel shows, Changes or Sessions, never both; null when it is closed. */
   sidebar: SidebarView | null;
@@ -165,9 +148,9 @@ export interface SpawnOptions {
 
 /**
  * `sessionId` and `resumed` say what actually started, which differs when a resume was not possible.
- * `attached` is true when the pane opened a running background session.
+ * `bgId` is the background session the pane attached to; without it the pane runs claude itself.
  */
-export type SpawnResult = { ok: true; sessionId: string; resumed: boolean; attached: boolean } | { ok: false; error: string };
+export type SpawnResult = { ok: true; sessionId: string; resumed: boolean; bgId?: string } | { ok: false; error: string };
 
 /** A Claude Code session on this machine, as `claude agents --json` lists it. */
 export interface AgentSession {
@@ -224,6 +207,16 @@ export interface HookEvent {
   /** PostToolUse: the tool and a short description of what it touched. */
   tool?: string;
   detail?: string;
+  /** Stop: background tasks still running, which start another turn when they finish. */
+  tasks?: BackgroundTask[];
+}
+
+/** A background shell command, subagent or monitor a session started, as its Stop hook lists it. */
+export interface BackgroundTask {
+  /** `shell` for a background command. */
+  type: string;
+  /** What it does, in Claude's words or as the command itself. */
+  label: string;
 }
 
 export interface GitFile {

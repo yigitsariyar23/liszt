@@ -48,9 +48,28 @@ ditto release/mac-arm64/Liszt.app /Applications/Liszt.app
 - Üst sıra projelerdir; her proje bir sekme yığınıdır (Vivaldi'deki gibi). Açık yığının oturumları
   alttaki ikinci sırada sekme olarak durur. Arka plandaki sekmeler çalışmaya devam eder.
 - Proje sekmelerini sürükleyerek sıralayabilirsiniz; ⌘1…9 bu sırayı izler.
+- Projeler, tarayıcıdaki sekme grupları gibi adlı ve renkli **gruplarda** toplanabilir. Grubun renkli
+  etiketi projelerinin önünde durur, projelerin altı grubun rengiyle çizilir.
+  - Proje menüsündeki **Add to Group → New Group** grubu açar ve adını hemen yazdırır; ad boş kalırsa
+    etiket yalnızca renk olur. **Move to Group** projeyi başka bir gruba, **Remove from Group** grubun
+    hemen sağına taşır.
+  - Etikete tıklamak grubu katlar: yalnızca etiket, proje sayısı ve gizlenen projelerin en acil durum
+    noktası kalır. Açık proje bu gruptaysa sekmesi görünmeye devam eder.
+  - Sürükleme: bir projeyi bir grubun projeleri arasına bırakmak onu o gruba katar, gruplanmamış
+    sekmelerin arasına bırakmak gruptan çıkarır. Etiketin sağ yarısına bırakılan proje grubun başına
+    girer, sol yarısına bırakılan grubun önüne geçer. Etiketi sürüklemek grubu bütün olarak taşır.
+  - Etikete sağ tıklayınca grup menüsü açılır: **Rename…**, **Color**, **Collapse / Expand**,
+    **Add Project to Group…** (klasör seçtirir; zaten açık olan bir klasörü gruba taşır), **Ungroup**
+    (projeler yerinde kalır) ve **Close Group** (gruptaki projeleri kapatır). Son projesi giden grup
+    kendiliğinden kalkar.
+- Sağ tık menüleri ve açılır listeler (Sessions'taki Show / Sort, Autopilot'un `max`'ı) macOS'un
+  menüleri değil, Liszt'in kendi menüleridir. Ok tuşları, Enter, Esc ve harfle atlama çalışır;
+  menü açıkken tuşlar terminale gitmez. Dışarı tıklamak menüyü kapatır ama tıklanan yere ulaşmaz,
+  başka bir yere sağ tıklamak oranın menüsünü açar.
 - Bir proje sekmesine sağ tıklayınca proje menüsü açılır:
   - **Rename…** projenin adını sekmenin üzerinde düzenletir; Enter kaydeder, Esc vazgeçer. Adı
     silip kaydetmek ya da **Use Folder Name** klasörün adına döner.
+  - **Add to Group / Move to Group / Remove from Group**, yukarıda anlatıldığı gibi.
   - **Fold** sekmeyi katlar: yalnızca ikonu ve yanındaki durum noktası kalır, adı üzerine gelince ipucunda
     görünür. **Unfold** geri açar; **Fold Others** diğer projeleri katlar, **Unfold All** hepsini açar.
   - **Choose Icon… / Detect Icon Again**, **Reveal in Finder** ve **Close Project**.
@@ -70,7 +89,13 @@ ditto release/mac-arm64/Liszt.app /Applications/Liszt.app
 - Claude cevabını bitirdiğinde o oturuma bakmıyorsanız oturum okunmamış olur: durum noktası Idle
   halkası yerine yeşil dolu nokta olur, sekme başlığı kalınlaşır, etiket **Unread** yazar ve proje
   sekmesinin noktası da yeşile döner. Oturuma geçmek, içine tıklamak ya da yazmak onu okur;
-  pencereye geri dönmek okumaz. İşaret `state.json`'da saklanır, yeniden açılışta da kalır.
+  pencereye geri dönmek okumaz. İşaret `state.json`'da saklanır, yeniden açılışta da kalır. Liszt
+  kapalıyken işini bitiren oturum da açılışta okunmamış görünür.
+- Claude turunu bitirdiği halde başlattığı arka plan işleri sürüyorsa (örneğin `run_in_background` ile
+  çalışan bir shell komutu) oturum bitmiş sayılmaz: etiket sarı **Waiting · 2m** olur, nokta sarı
+  halkaya döner. Etiketin ipucu ve Sessions satırı neyin beklendiğini yazar
+  (`Waiting on shell · Run the test suite`). İş bitince Claude kaldığı yerden devam eder; bildirim ve
+  **Unread** ancak son turu bitince gelir, task kartı da o zamana kadar In progress'te kalır.
 - Bölmeler arasındaki çizgiyi sürükleyerek boyutlandırabilirsiniz. Bölme başlığındaki "çıkar" ikonu
   oturumu bölmeden alır ama sekme olarak çalışmaya devam ettirir.
 - Proje ikonları projenin kendisinden bulunur: Unity'nin uygulama ikonu, Godot'nun `config/icon`'u,
@@ -116,12 +141,29 @@ ditto release/mac-arm64/Liszt.app /Applications/Liszt.app
 ## Nasıl çalışır
 
 - `src/main/main.ts`: pencere, pty'ler, git sorguları, menü ve hook sunucusu.
-- Her Claude paneli `claude --settings <userData>/claude-settings.json --session-id <uuid>` ile açılır.
-  Bu ayar dosyasındaki hook'lar (`SessionStart`, `UserPromptSubmit`, `Notification`, `Stop`,
-  `PostToolUse`, `SessionEnd`) olayı `127.0.0.1` üzerindeki token korumalı sunucuya yollar.
-  Panel etiketleri (Running · 1m / Needs you / Unread / Idle) buradan gelir.
+- Her Claude paneli bir Claude Code arka plan oturumudur. Liszt oturumu `claude --bg` ile (devam eden
+  bir konuşmada `claude --bg --resume <sessionId>` ile) Claude Code'un arka plan sunucusunda başlatır;
+  panelin terminali yalnızca `claude attach <id>` çalıştırır. Bu yüzden ⌘Q ile çıkınca oturumlar
+  durmaz, çalışmaya devam eder; bir sonraki açılışta paneller aynı oturumlara yeniden bağlanır. Bu
+  oturumlar `claude agents` görünümünde de arka plan oturumu olarak listelenir.
+- Claude Code güvenmediği klasörde arka plan oturumu başlatmaz. Böyle bir klasörde panel claude'u
+  doğrudan `claude --session-id <uuid>` ile açar; güven sorusu orada sorulur ve oturum uygulamayla
+  birlikte kapanır. Klasöre bir kez güvenince sonraki açılışta arka plana geçer. Shell panelleri de
+  uygulamayla birlikte kapanır.
+- Her panel hook'larını (`SessionStart`, `UserPromptSubmit`, `Notification`, `Stop`, `PostToolUse`,
+  `SessionEnd`) satır içi bir `--settings` JSON'u olarak alır ve panelin kimliği komutun içinde yazılıdır.
+  Bunun sebebi, arka plan sunucusunun oturumları panelin değil kendi ortamıyla çalıştırmasıdır. Hook,
+  olayı `127.0.0.1` üzerindeki token korumalı sunucuya yollar. Adresi o an `<userData>/hook-url`
+  dosyasından okur (dosyayı yalnızca kullanıcı okuyabilir). Böylece önceki açılışta başlamış oturumlar
+  da şimdiki Liszt'e ulaşır; Liszt kapalıyken dosya yoktur ve hook bir şey göndermez. Panel etiketleri
+  (Running · 1m / Waiting · 1m / Needs you / Unread / Idle) buradan gelir. Yeniden bağlanan panel ilk
+  hook gelene kadar durumunu `claude agents` listesinden alır. Liszt'in başlatmadığı oturumlar hook
+  göndermez; onların durumu her zaman bu listeden gelir.
+- `<userData>/claude-settings.json` yalnızca eski sürümlerin arka plana aldığı oturumlar uyandırılırken
+  bulunsun diye yazılır.
 - Paneller, projeler ve oturum kimlikleri `~/Library/Application Support/Liszt/state.json` içinde
-  saklanır. Uygulama yeniden açıldığında prompt almış oturumlar `claude --resume <id>` ile geri gelir.
+  saklanır. Uygulama yeniden açıldığında paneller oturumlarına `claude attach <id>` ile bağlanır. Claude
+  Code'un artık tanımadığı oturumlar `claude --bg --resume <id>` ile geri gelir.
   Sessions'ta arşivlenen ve silinen oturumlar da burada, oturum kimliğiyle `sessionMarks` altında durur.
 - Paneller ancak projesi ilk kez açıldığında başlatılır, böylece çok proje eklemek açılışı yavaşlatmaz.
 - Ana süreç 10 saniyede bir `claude agents --json --all` çalıştırır ve listeyi renderer'a yollar. Bir
@@ -132,14 +174,13 @@ ditto release/mac-arm64/Liszt.app /Applications/Liszt.app
   `cliSessionId` ve `isArchived` buradan, sabitlenenler `claude_desktop_config.json`'daki
   `starred-local-code-sessions` listesinden gelir. Liszt bu dosyalara yazmaz; her dosya yalnızca
   değiştiğinde yeniden okunur.
-- Panelde `/background` yazılırsa Claude Code oturumu arka plan sunucusuna (`--bg-pty-host`) yeni bir
-  kimlikle taşır ve panelin süreci `backgrounded · <id>` yazıp çıkar. Liszt bu satırı yakalayıp paneli
-  o oturuma bağlar; **Resume** artık `claude attach <id>` ile ona bağlanır. Attach edilen paneller
-  hook almadığı için durum etiketini `claude agents` listesinden alır.
-- Bir panel (ya da projesi) kapatılınca oturumu arka planda çalışıyorsa `claude stop <id>` ile
-  durdurulur. Konuşma silinmez: oturum Sessions'ta Not running altında Stopped olarak kalır ve tıklayınca
-  `claude attach <id>` ile geri gelir. Uygulamadan
-  çıkarken arka plan oturumları durdurulmaz: paneller bir sonraki açılışta onlara yeniden bağlanır.
+- Claude'u doğrudan çalıştıran bir panelde `/background` yazılırsa Claude Code oturumu arka plan
+  sunucusuna (`--bg-pty-host`) yeni bir kimlikle taşır ve panelin süreci `backgrounded · <id>` yazıp
+  çıkar. Liszt bu satırı yakalayıp paneli o oturuma bağlar; **Resume** artık `claude attach <id>` ile
+  ona bağlanır.
+- Bir panel (ya da projesi) kapatılınca oturumu `claude stop <id>` ile durdurulur. Konuşma silinmez:
+  oturum Sessions'ta Not running altında Stopped olarak kalır ve tıklayınca `claude attach <id>` ile geri
+  gelir. **New session** da panelin eski oturumunu durdurur.
 - Login shell ortamı (`.zprofile`, `.zshrc`) bir kez okunur. Böylece Finder'dan açıldığında da
   paneller terminaldeki PATH'i ve değişkenleri görür.
 
@@ -166,8 +207,8 @@ ditto release/mac-arm64/Liszt.app /Applications/Liszt.app
 ## Geliştirici notları
 
 - `npm run typecheck`: tip kontrolü. `npm run build`: `dist/` çıktısını üretir.
-- `LISZT_USER_DATA=<klasör>`: ayrı bir profille çalıştırır. `LISZT_DEBUG=1` gelen hook'ları ve
-  durdurulan arka plan oturumlarını konsola yazar. `LISZT_CAPTURE=<dosya.png>` ise birkaç saniye
+- `LISZT_USER_DATA=<klasör>`: ayrı bir profille çalıştırır. `LISZT_DEBUG=1` gelen hook'ları,
+  durdurulan arka plan oturumlarını ve başlatılamayan bir arka plan oturumunun sebebini konsola yazar. `LISZT_CAPTURE=<dosya.png>` ise birkaç saniye
   sonra (`LISZT_CAPTURE_DELAY` ms, varsayılan 8000) ekran görüntüsü alıp uygulamayı kapatır.
   `LISZT_TEST_SCRIPT=<dosya.js>` sayfa yüklendikten sonra bir betik çalıştırır ve dönen değeri
   `[test]` satırı olarak yazar.

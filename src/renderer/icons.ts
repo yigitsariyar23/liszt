@@ -14,6 +14,9 @@ export const ICONS = {
   plus: icon('<path d="M8 3.2v9.6M3.2 8h9.6"/>'),
   close: icon('<path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/>'),
   more: icon('<path d="M3.5 8h.01M8 8h.01M12.5 8h.01" stroke-width="2.4"/>'),
+  check: icon('<path d="M3.2 8.4 6.4 11.4 12.8 4.6" stroke-width="1.8"/>'),
+  chevronRight: icon('<path d="M6 3.5 10.5 8 6 12.5" stroke-width="1.8"/>'),
+  chevronDown: icon('<path d="M3.5 6 8 10.5 12.5 6" stroke-width="1.8"/>'),
   unsplit: icon('<rect x="1.8" y="2.8" width="12.4" height="10.4" rx="2"/><path d="M8 2.8v10.4M10.2 6.6l1.7 1.4-1.7 1.4"/>'),
 };
 

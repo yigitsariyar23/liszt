@@ -37,26 +37,8 @@
           <div class="session-tools">
             <input id="session-search" type="search" placeholder="Search title, project, folder" autocomplete="off" spellcheck="false" />
             <div class="session-selects">
-              <label class="muted"
-                >Show
-                <select id="session-filter">
-                  <option value="active">Active</option>
-                  <option value="liszt">In Liszt</option>
-                  <option value="running">Running</option>
-                  <option value="pinned">Pinned</option>
-                  <option value="archived">Archived</option>
-                  <option value="all">All</option>
-                </select>
-              </label>
-              <label class="muted"
-                >Sort
-                <select id="session-sort">
-                  <option value="status">Status</option>
-                  <option value="recent">Recent</option>
-                  <option value="name">Name</option>
-                  <option value="project">Project</option>
-                </select>
-              </label>
+              <label class="muted">Show <button id="session-filter"></button></label>
+              <label class="muted">Sort <button id="session-sort"></button></label>
             </div>
           </div>
           <div id="session-list"></div>
@@ -81,15 +63,7 @@
           </div>
           <div class="autopilot-controls">
             <div class="seg"><button id="ap-off">Off</button><button id="ap-on">On</button></div>
-            <label class="muted" title="Most cards in progress at once"
-              >max
-              <select id="ap-limit">
-                <option>1</option>
-                <option>2</option>
-                <option>3</option>
-                <option>4</option>
-              </select>
-            </label>
+            <label class="muted" title="Most cards in progress at once">max <button id="ap-limit"></button></label>
           </div>
         </div>
         <input id="task-input" placeholder="+ Add a task and press Enter" autocomplete="off" spellcheck="false" />

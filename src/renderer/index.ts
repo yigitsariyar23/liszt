@@ -10,12 +10,15 @@ import type {
   AgentSession,
   AppSession,
   AppState,
+  BackgroundTask,
   GitInfo,
   GitResult,
+  GroupColor,
   HookEvent,
   LayoutNode,
   PaneKind,
   PaneState,
+  ProjectGroup,
   ProjectState,
   SessionFilter,
   SessionSort,
@@ -23,8 +26,10 @@ import type {
   TaskState,
   TaskStatus,
 } from '../shared/types';
+import { h, iconEl } from './dom';
 import { ICONS, KIND_GLYPH } from './icons';
 import { leaf, panesIn, removePane, replacePane, splitPane, type Side } from './layout';
+import { closeMenu, dropdown, showMenu, type MenuAnchor, type MenuEntry } from './menu';
 
 declare global {
   interface Window {
@@ -34,7 +39,11 @@ declare global {
 
 const api = window.liszt;
 
-type Status = 'starting' | 'idle' | 'running' | 'attention' | 'exited';
+/** `waiting`: Claude ended its turn while background tasks it started still run; it goes on when they finish. */
+type Status = 'starting' | 'idle' | 'running' | 'attention' | 'waiting' | 'exited';
+
+/** Claude has work under way, whether it is acting, asking or waiting on its background tasks. */
+const isWorking = (v: PaneView) => v.status === 'running' || v.status === 'attention' || v.status === 'waiting';
 type DropZone = Side | 'center';
 
 interface PaneView {
@@ -55,7 +64,7 @@ interface PaneView {
   activity: string;
   /** Tool calls in the current turn. */
   actions: number;
-  /** Running `claude attach` on a background session, whose hooks may not reach this pane. */
+  /** Running `claude attach` on a background session rather than claude itself. */
   attached: boolean;
   /** A hook arrived since the last spawn, so hooks drive the status. */
   hooked: boolean;
@@ -109,6 +118,7 @@ const THEME = {
 let state: AppState = {
   version: 1,
   projects: [],
+  groups: [],
   activeProjectId: null,
   sidebar: 'changes',
   tasksPanel: true,
@@ -137,25 +147,53 @@ const taskInput = byId<HTMLInputElement>('task-input');
 const tasksProjectEl = byId('tasks-project');
 const apOffBtn = byId('ap-off');
 const apOnBtn = byId('ap-on');
-const apLimit = byId<HTMLSelectElement>('ap-limit');
+const apLimit = dropdown(
+  byId('ap-limit'),
+  ['1', '2', '3', '4'].map((n): [string, string] => [n, n]),
+  (n) => {
+    const project = activeProject();
+    if (!project) return;
+    project.autopilot.limit = Number(n);
+    save();
+    void pump(project);
+  },
+);
 const sessionListEl = byId('session-list');
 const sessionsCountEl = byId('sessions-count');
 const sessionSearch = byId<HTMLInputElement>('session-search');
-const sessionFilterEl = byId<HTMLSelectElement>('session-filter');
-const sessionSortEl = byId<HTMLSelectElement>('session-sort');
+const sessionFilter = dropdown<SessionFilter>(
+  byId('session-filter'),
+  [
+    ['active', 'Active'],
+    ['liszt', 'In Liszt'],
+    ['running', 'Running'],
+    ['pinned', 'Pinned'],
+    ['archived', 'Archived'],
+    ['all', 'All'],
+  ],
+  (value) => {
+    state.sessionFilter = value;
+    renderSessions();
+    save();
+  },
+);
+const sessionSort = dropdown<SessionSort>(
+  byId('session-sort'),
+  [
+    ['status', 'Status'],
+    ['recent', 'Recent'],
+    ['name', 'Name'],
+    ['project', 'Project'],
+  ],
+  (value) => {
+    state.sessionSort = value;
+    renderSessions();
+    save();
+  },
+);
 
-function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string): HTMLElementTagNameMap[K] {
-  const el = document.createElement(tag);
-  if (cls) el.className = cls;
-  if (text !== undefined) el.textContent = text;
-  return el;
-}
-
-function iconEl(svg: string, cls: string): HTMLElement {
-  const el = h('span', cls);
-  el.innerHTML = svg;
-  return el;
-}
+/** Where a right-click happened, for the menu it opens. */
+const pointer = (e: MouseEvent): MenuAnchor => ({ x: e.clientX, y: e.clientY });
 
 const uuid = () => crypto.randomUUID();
 const activeProject = () => state.projects.find((p) => p.id === state.activeProjectId) ?? null;
@@ -281,11 +319,10 @@ function createView(project: ProjectState, pane: PaneState): PaneView {
   };
   views.set(pane.id, v);
 
-  term.onData((data) => {
-    api.write(pane.id, data);
-    // Typing into a session reads it; the focus reports xterm sends when the window comes back do not.
-    if (data !== '\x1b[I' && data !== '\x1b[O') setUnread(v, false);
-  });
+  term.onData((data) => api.write(pane.id, data));
+  // Typing into a session reads it. What else the terminal sends does not: focus and mouse reports,
+  // and its answers to the queries claude makes on starting or attaching.
+  term.textarea?.addEventListener('keydown', () => setUnread(v, false));
   // Claude names the task it is working on in the terminal title ("✳ Fix login crash").
   term.onTitleChange((raw) => {
     const clean = raw.replace(/^[^\p{L}\p{N}]+/u, '').trim();
@@ -306,7 +343,7 @@ function createView(project: ProjectState, pane: PaneState): PaneView {
   titleEl.addEventListener('dblclick', () => editTitle(v));
   head.addEventListener('contextmenu', (e) => {
     e.preventDefault();
-    void sessionMenu(v, 'head');
+    void sessionMenu(v, 'head', pointer(e));
   });
   head.addEventListener('dragstart', (e) => beginDrag(e, pane.id));
   head.addEventListener('dragend', endDrag);
@@ -344,10 +381,15 @@ function scheduleFit(v: PaneView) {
   });
 }
 
+/** A Claude pane that has a session goes on with it: attached while it is a background session, resumed otherwise. */
+const continues = (pane: PaneState) => pane.kind === 'claude' && (pane.started || Boolean(pane.bgId));
+
 async function spawn(v: PaneView, resume: boolean, prompt?: string) {
   // A session id is only reused for --resume; a fresh start always gets a new one so it never
   // collides with an id claude has already seen.
   if (v.pane.kind === 'claude' && !resume) {
+    // Left alone, the old background session would keep running with no pane.
+    if (v.pane.bgId) api.stopBackground(v.pane.sessionId, v.pane.bgId);
     v.pane.sessionId = uuid();
     v.pane.started = false;
     v.pane.bgId = undefined;
@@ -375,19 +417,18 @@ async function spawn(v: PaneView, resume: boolean, prompt?: string) {
     transcript: v.pane.transcript,
     attach: resume ? v.pane.bgId : undefined,
   });
-  if (res.ok && resume && !res.resumed) {
-    v.pane.sessionId = res.sessionId;
-    v.pane.started = false;
-    v.pane.transcript = undefined;
-    save();
-  }
-  if (res.ok) {
-    v.attached = res.attached;
-    if (v.pane.bgId && !res.attached) {
-      v.pane.bgId = undefined;
-      save();
+  // Closed while claude started.
+  if (views.get(v.pane.id) !== v) return;
+  if (res.ok && v.pane.kind === 'claude') {
+    if (resume && !res.resumed) {
+      v.pane.started = false;
+      v.pane.transcript = undefined;
     }
-    if (res.attached) syncAttached(v);
+    v.pane.sessionId = res.sessionId;
+    v.pane.bgId = res.bgId;
+    v.attached = Boolean(res.bgId);
+    save();
+    syncAttached(v);
   }
   if (!res.ok) {
     v.term.writeln(`\r\n\x1b[31mCould not start: ${res.error}\x1b[0m`);
@@ -409,6 +450,11 @@ function restart(v: PaneView, resume: boolean) {
 function setStatus(v: PaneView, status: Status, keepSince = false) {
   if (!(keepSince && v.since)) v.since = Date.now();
   v.status = status;
+  // Starting and exiting say nothing about the session, and quitting Liszt exits every pane.
+  if (status !== 'starting' && status !== 'exited' && Boolean(v.pane.working) !== isWorking(v)) {
+    v.pane.working = isWorking(v) || undefined;
+    save();
+  }
   paintStatus(v);
 }
 
@@ -437,6 +483,8 @@ function chipText(v: PaneView): string {
       return `Running · ${duration(Date.now() - v.since)}`;
     case 'attention':
       return 'Needs you';
+    case 'waiting':
+      return `Waiting · ${duration(Date.now() - v.since)}`;
     case 'idle':
       return isUnread(v) ? 'Unread' : 'Idle';
     case 'exited':
@@ -451,6 +499,8 @@ const chipClass = (v: PaneView) => `chip ${isUnread(v) ? 'unread' : v.status}`;
 function paintChip(el: HTMLElement, v: PaneView) {
   el.className = chipClass(v);
   el.textContent = chipText(v);
+  // Says what it waits on.
+  el.title = v.status === 'waiting' ? v.activity : '';
 }
 
 function renderChip(v: PaneView) {
@@ -468,7 +518,7 @@ function renderChip(v: PaneView) {
  */
 const isUnread = (v: PaneView) => Boolean(v.pane.unread) && (v.status === 'idle' || !v.spawned);
 
-const dotClass = (v: PaneView) => (isUnread(v) ? 'unread' : ['running', 'attention', 'exited'].includes(v.status) ? v.status : '');
+const dotClass = (v: PaneView) => (isUnread(v) ? 'unread' : ['running', 'attention', 'waiting', 'exited'].includes(v.status) ? v.status : '');
 
 /** The user is looking at this session right now, so a reply it gets is read as it arrives. */
 const watching = (v: PaneView) => document.hasFocus() && state.activeProjectId === v.project.id && focusedPaneId === v.pane.id;
@@ -498,7 +548,7 @@ function renderActions(v: PaneView) {
     button('Restart', () => restart(v, false));
     return;
   }
-  if (v.pane.started) button('Resume', () => restart(v, true));
+  if (continues(v.pane)) button('Resume', () => restart(v, true));
   button('New session', () => restart(v, false));
 }
 
@@ -556,19 +606,25 @@ function renameTab(v: PaneView) {
   if (title) editTitle(v, title);
 }
 
-async function sessionMenu(v: PaneView, from: 'tab' | 'head') {
+async function sessionMenu(v: PaneView, from: 'tab' | 'head', at: MenuAnchor) {
   const project = v.project;
   const visible = panesIn(project.layout);
   const anchor = splitAnchor(project);
-  const choice = await api.sessionMenu({
-    claude: v.pane.kind === 'claude',
-    renamed: Boolean(v.pane.customTitle),
-    canSplit: Boolean(anchor && anchor !== v.pane.id),
-    inSplit: visible.length > 1 && visible.includes(v.pane.id),
-    started: v.pane.started,
-    others: project.panes.length > 1,
-    unread: Boolean(v.pane.unread),
-  });
+  const canSplit = Boolean(anchor && anchor !== v.pane.id);
+  const entries: MenuEntry[] = [{ label: 'Rename…', id: 'rename' }];
+  if (v.pane.customTitle) entries.push({ label: 'Use Automatic Name', id: 'reset-name' });
+  entries.push(
+    { label: v.pane.unread ? 'Mark as Read' : 'Mark as Unread', id: 'unread' },
+    'separator',
+    { label: 'Split Right', id: 'split-right', enabled: canSplit },
+    { label: 'Split Down', id: 'split-down', enabled: canSplit },
+    { label: 'Take Out of Split', id: 'unsplit', enabled: visible.length > 1 && visible.includes(v.pane.id) },
+    'separator',
+    { label: 'Reveal in Finder', id: 'reveal' },
+  );
+  if (v.pane.kind === 'claude') entries.push({ label: 'Copy Session ID', id: 'copy-id', enabled: v.pane.started });
+  entries.push('separator', { label: 'Close Session', id: 'close' }, { label: 'Close Other Sessions', id: 'close-others', enabled: project.panes.length > 1 });
+  const choice = await showMenu(entries, at);
   // The session may have been closed while the menu was open.
   if (views.get(v.pane.id) !== v) return;
   switch (choice) {
@@ -805,7 +861,7 @@ function addPane(kind: PaneKind, project = activeProject(), opts: PaneOptions = 
  * the caller already asked; `stop: false` leaves a background session to the caller, which deletes it.
  */
 function closePane(v: PaneView, { ask = true, stop = true } = {}): boolean {
-  if (ask && (v.status === 'running' || v.status === 'attention') && !confirm(`"${displayTitle(v)}" is still working. Close it?`)) return false;
+  if (ask && isWorking(v) && !confirm(`"${displayTitle(v)}" is still working. Close it?`)) return false;
   const project = v.project;
   const index = project.panes.indexOf(v.pane);
   const visible = panesIn(project.layout);
@@ -940,7 +996,7 @@ function renderSessionBar() {
     tab.addEventListener('auxclick', (e) => e.button === 1 && closePane(v));
     tab.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      void sessionMenu(v, 'tab');
+      void sessionMenu(v, 'tab', pointer(e));
     });
     tab.addEventListener('dragstart', (e) => beginDrag(e, pane.id));
     tab.addEventListener('dragend', endDrag);
@@ -1001,6 +1057,7 @@ function projectStatus(project: ProjectState): string {
   const list = project.panes.flatMap((p) => views.get(p.id) ?? []);
   if (list.some((v) => v.status === 'attention')) return 'attention';
   if (list.some((v) => v.status === 'running')) return 'running';
+  if (list.some((v) => v.status === 'waiting')) return 'waiting';
   if (list.some(isUnread)) return 'unread';
   return '';
 }
@@ -1020,90 +1077,336 @@ function projectIcon(project: ProjectState): HTMLElement {
   return glyph;
 }
 
-// Project tabs are dragged to reorder them, the same way session tabs are.
+// Project tabs are dragged to reorder them, the same way session tabs are. They can be gathered into
+// named, coloured groups, like a browser's tab groups: the group's own tab leads its projects, and
+// clicking it collapses them into it. A dragged project joins the group of the tab it is dropped on;
+// dragging a group's tab moves its projects together.
 const PROJECT_DRAG_TYPE = 'application/x-liszt-project';
+const GROUP_DRAG_TYPE = 'application/x-liszt-group';
+const GROUP_COLORS: Array<[GroupColor, string, string]> = [
+  ['grey', 'Grey', '#a1a1aa'],
+  ['blue', 'Blue', '#6fa3e6'],
+  ['green', 'Green', '#6cc287'],
+  ['yellow', 'Yellow', '#e2b84f'],
+  ['orange', 'Orange', '#ea925e'],
+  ['red', 'Red', '#e36d6d'],
+  ['pink', 'Pink', '#e48fbf'],
+  ['purple', 'Purple', '#b394ec'],
+  ['cyan', 'Cyan', '#5fc4c4'],
+];
 const projectTabEls = new Map<string, HTMLElement>();
+const groupTabEls = new Map<string, HTMLElement>();
 let dragProjectId: string | null = null;
+let dragGroupId: string | null = null;
 let tabsDirty = false;
+
+const groupOf = (project: ProjectState) => state.groups.find((g) => g.id === project.groupId);
+const groupMembers = (group: ProjectGroup) => state.projects.filter((p) => p.groupId === group.id);
+const groupColor = (group: ProjectGroup) => (GROUP_COLORS.find(([c]) => c === group.color) ?? GROUP_COLORS[0])[2];
+
+/** A group's name, or what it holds when it has none. */
+function groupLabel(group: ProjectGroup): string {
+  if (group.name) return group.name;
+  const [first, ...rest] = groupMembers(group);
+  return rest.length ? `${first.name} + ${rest.length} more` : first.name;
+}
+
+/** The most urgent status among some projects. */
+function groupStatus(projects: ProjectState[]): string {
+  const all = projects.map(projectStatus);
+  return ['attention', 'running', 'waiting', 'unread'].find((s) => all.includes(s)) ?? '';
+}
+
+/** Keeps each group's projects together where its first one sits, and drops groups left empty. */
+function normalizeGroups() {
+  const known = new Set(state.groups.map((g) => g.id));
+  const placed = new Set<string>();
+  const order: ProjectState[] = [];
+  for (const p of state.projects) {
+    if (p.groupId && !known.has(p.groupId)) p.groupId = undefined;
+    if (!p.groupId) order.push(p);
+    else if (!placed.has(p.groupId)) {
+      placed.add(p.groupId);
+      order.push(...state.projects.filter((q) => q.groupId === p.groupId));
+    }
+  }
+  state.projects = order;
+  state.groups = state.groups.filter((g) => placed.has(g.id));
+}
 
 function renderTabs() {
   // Replacing the tab being dragged or renamed would cancel that; rebuild once it ends.
-  if (dragProjectId || tabsEl.querySelector('[contenteditable="true"]')) {
+  if (dragProjectId || dragGroupId || tabsEl.querySelector('[contenteditable="true"]')) {
     tabsDirty = true;
     return;
   }
   tabsDirty = false;
   projectTabEls.clear();
-  tabsEl.replaceChildren(
-    ...state.projects.map((p) => {
-      const tab = h('div', `tab${p.id === state.activeProjectId ? ' active' : ''}${p.folded ? ' folded' : ''}`);
-      tab.draggable = true;
-      tab.title = `${p.name}\n${p.path}\nDrag to reorder, right-click to rename, fold or change the icon`;
-      const close = iconEl(ICONS.close, 'tab-close');
-      close.title = 'Close project (⇧⌘W)';
-      const name = h('span', 'tab-name', p.name);
-      tab.append(projectIcon(p), name);
-      if (p.panes.length > 1) tab.append(h('span', 'tab-count', String(p.panes.length)));
-      tab.append(h('span', `dot ${projectStatus(p)}`), close);
-      tab.addEventListener('click', (e) => {
-        if (close.contains(e.target as Node)) closeProject(p);
-        else if (!name.isContentEditable) activateProject(p.id);
-      });
-      tab.addEventListener('auxclick', (e) => e.button === 1 && closeProject(p));
-      tab.addEventListener('contextmenu', (e) => {
-        e.preventDefault();
-        void projectMenu(p);
-      });
-      tab.addEventListener('dragstart', (e) => {
-        dragProjectId = p.id;
-        e.dataTransfer?.setData(PROJECT_DRAG_TYPE, p.id);
-        if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
-        tab.classList.add('dragging');
-      });
-      tab.addEventListener('dragend', endProjectDrag);
-      const dropsAfter = (e: DragEvent) => {
-        const r = tab.getBoundingClientRect();
-        return e.clientX > r.left + r.width / 2;
-      };
-      tab.addEventListener('dragover', (e) => {
-        if (!dragProjectId) return;
-        e.preventDefault();
-        const after = dropsAfter(e);
-        tab.classList.toggle('drop-after', after);
-        tab.classList.toggle('drop-before', !after);
-      });
-      tab.addEventListener('dragleave', (e) => {
-        if (!tab.contains(e.relatedTarget as Node | null)) tab.classList.remove('drop-before', 'drop-after');
-      });
-      tab.addEventListener('drop', (e) => {
-        if (!dragProjectId) return;
-        e.preventDefault();
-        const dragged = dragProjectId;
-        const after = dropsAfter(e);
-        endProjectDrag();
-        dropOnProject(p.id, dragged, after);
-      });
-      projectTabEls.set(p.id, tab);
-      return tab;
-    }),
+  groupTabEls.clear();
+  const els: HTMLElement[] = [];
+  for (let i = 0; i < state.projects.length; ) {
+    const group = groupOf(state.projects[i]);
+    if (!group) {
+      els.push(projectTab(state.projects[i++]));
+      continue;
+    }
+    const members: ProjectState[] = [];
+    while (state.projects[i]?.groupId === group.id) members.push(state.projects[i++]);
+    els.push(groupBox(group, members));
+  }
+  tabsEl.replaceChildren(...els);
+}
+
+function projectTab(p: ProjectState): HTMLElement {
+  const tab = h('div', `tab${p.id === state.activeProjectId ? ' active' : ''}${p.folded ? ' folded' : ''}`);
+  tab.draggable = true;
+  tab.title = `${p.name}\n${p.path}\nDrag to reorder or into a group, right-click for more`;
+  const close = iconEl(ICONS.close, 'tab-close');
+  close.title = 'Close project (⇧⌘W)';
+  const name = h('span', 'tab-name', p.name);
+  tab.append(projectIcon(p), name);
+  if (p.panes.length > 1) tab.append(h('span', 'tab-count', String(p.panes.length)));
+  tab.append(h('span', `dot ${projectStatus(p)}`), close);
+  tab.addEventListener('click', (e) => {
+    if (close.contains(e.target as Node)) closeProject(p);
+    else if (!name.isContentEditable) activateProject(p.id);
+  });
+  tab.addEventListener('auxclick', (e) => e.button === 1 && closeProject(p));
+  tab.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    void projectMenu(p, pointer(e));
+  });
+  tab.addEventListener('dragstart', (e) => {
+    dragProjectId = p.id;
+    e.dataTransfer?.setData(PROJECT_DRAG_TYPE, p.id);
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+    tab.classList.add('dragging');
+  });
+  tab.addEventListener('dragend', endProjectDrag);
+  dropTarget(
+    tab,
+    () => Boolean(dragProjectId || (dragGroupId && dragGroupId !== p.groupId)),
+    (project, group, after) => (project ? dropOnProject(p.id, project, after) : group && moveGroup(group, p, after)),
   );
+  projectTabEls.set(p.id, tab);
+  return tab;
+}
+
+/** A group's tab followed by its projects' tabs, or only the open one of them while it is collapsed. */
+function groupBox(group: ProjectGroup, members: ProjectState[]): HTMLElement {
+  const box = h('div', `tgroup${group.collapsed ? ' collapsed' : ''}`);
+  box.style.setProperty('--group', groupColor(group));
+  const chip = h('div', 'tgroup-chip');
+  chip.draggable = true;
+  const name = h('span', 'tgroup-name', group.name);
+  chip.append(name);
+  if (group.collapsed) chip.append(h('span', 'tgroup-count', String(members.length)));
+  const count = `${members.length} ${members.length === 1 ? 'project' : 'projects'}`;
+  chip.title = `${groupLabel(group)} · ${count}\nClick to ${group.collapsed ? 'expand' : 'collapse'}, drag to move, right-click for more`;
+  chip.addEventListener('click', () => name.isContentEditable || toggleGroup(group));
+  chip.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    void groupMenu(group, pointer(e));
+  });
+  chip.addEventListener('dragstart', (e) => {
+    dragGroupId = group.id;
+    e.dataTransfer?.setData(GROUP_DRAG_TYPE, group.id);
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+    box.classList.add('dragging');
+  });
+  chip.addEventListener('dragend', endProjectDrag);
+  // Dropped on the right half a project joins the group as its first; on the left half it goes before the group.
+  dropTarget(
+    chip,
+    () => Boolean(dragProjectId || (dragGroupId && dragGroupId !== group.id)),
+    (project, other, after) => (project ? dropOnGroup(group, project, after) : other && moveGroup(other, members[0], after)),
+  );
+  groupTabEls.set(group.id, chip);
+  box.append(chip);
+  // The open project stays in sight when its group collapses; the dot speaks for the hidden ones.
+  const shown = group.collapsed ? members.filter((p) => p.id === state.activeProjectId) : members;
+  const status = group.collapsed ? groupStatus(members.filter((p) => !shown.includes(p))) : '';
+  if (status) box.append(h('span', `dot ${status}`));
+  box.append(...shown.map(projectTab));
+  return box;
+}
+
+/** Lets a tab take a dragged project or group, marking which side of it the drop lands on. */
+function dropTarget(el: HTMLElement, accepts: () => boolean, drop: (project: string | null, group: string | null, after: boolean) => void) {
+  const dropsAfter = (e: DragEvent) => {
+    const r = el.getBoundingClientRect();
+    return e.clientX > r.left + r.width / 2;
+  };
+  el.addEventListener('dragover', (e) => {
+    if (!accepts()) return;
+    e.preventDefault();
+    const after = dropsAfter(e);
+    el.classList.toggle('drop-after', after);
+    el.classList.toggle('drop-before', !after);
+  });
+  // Moving onto the tab's own name or icon also fires a dragleave; only leaving the tab counts.
+  el.addEventListener('dragleave', (e) => {
+    if (!el.contains(e.relatedTarget as Node | null)) el.classList.remove('drop-before', 'drop-after');
+  });
+  el.addEventListener('drop', (e) => {
+    if (!accepts()) return;
+    e.preventDefault();
+    const [project, group] = [dragProjectId, dragGroupId];
+    const after = dropsAfter(e);
+    endProjectDrag();
+    drop(project, group, after);
+  });
 }
 
 function endProjectDrag() {
   dragProjectId = null;
+  dragGroupId = null;
   for (const el of tabsEl.querySelectorAll('.drop-before, .drop-after, .dragging')) el.classList.remove('drop-before', 'drop-after', 'dragging');
   if (tabsDirty) renderTabs();
 }
 
-function dropOnProject(targetId: string, draggedId: string, after: boolean) {
-  if (draggedId === targetId) return;
-  const from = state.projects.findIndex((p) => p.id === draggedId);
-  if (from < 0) return;
-  const [moved] = state.projects.splice(from, 1);
-  const to = state.projects.findIndex((p) => p.id === targetId) + (after ? 1 : 0);
-  state.projects.splice(to, 0, moved);
+/** Puts groups and the order of their projects right after a change, then shows and saves it. */
+function regroup() {
+  normalizeGroups();
   renderTabs();
   save();
+}
+
+function dropOnProject(targetId: string, draggedId: string, after: boolean) {
+  const target = state.projects.find((p) => p.id === targetId);
+  const moved = state.projects.find((p) => p.id === draggedId);
+  if (!target || !moved || moved === target) return;
+  state.projects.splice(state.projects.indexOf(moved), 1);
+  state.projects.splice(state.projects.indexOf(target) + (after ? 1 : 0), 0, moved);
+  // Dropped among a group's tabs it joins that group; dropped among loose tabs it leaves its own.
+  moved.groupId = target.groupId;
+  regroup();
+}
+
+/** A project dropped on a group's tab joins the group as its first project, or goes just before the group. */
+function dropOnGroup(group: ProjectGroup, draggedId: string, into: boolean) {
+  const moved = state.projects.find((p) => p.id === draggedId);
+  if (!moved) return;
+  const [first] = groupMembers(group).filter((p) => p !== moved);
+  if (first) {
+    state.projects.splice(state.projects.indexOf(moved), 1);
+    state.projects.splice(state.projects.indexOf(first), 0, moved);
+  }
+  moved.groupId = into ? group.id : undefined;
+  regroup();
+}
+
+/** Moves a group's projects together, before or after a project's tab, or that project's whole group. */
+function moveGroup(groupId: string, target: ProjectState, after: boolean) {
+  if (target.groupId === groupId) return;
+  const block = state.projects.filter((p) => p.groupId === groupId);
+  const rest = state.projects.filter((p) => p.groupId !== groupId);
+  const around = target.groupId ? rest.filter((p) => p.groupId === target.groupId) : [target];
+  rest.splice(after ? rest.indexOf(around[around.length - 1]) + 1 : rest.indexOf(around[0]), 0, ...block);
+  state.projects = rest;
+  regroup();
+}
+
+/** Starts a group holding this project and lets the user name it right away. */
+function createGroup(project: ProjectState) {
+  const used = new Set(state.groups.map((g) => g.color));
+  const [color] = GROUP_COLORS.find(([c]) => !used.has(c)) ?? GROUP_COLORS[state.groups.length % GROUP_COLORS.length];
+  const group: ProjectGroup = { id: uuid(), name: '', color };
+  state.groups.push(group);
+  project.groupId = group.id;
+  regroup();
+  renameGroup(group);
+}
+
+/** Moves a project to the end of a group. */
+function joinGroup(project: ProjectState, group: ProjectGroup) {
+  const last = groupMembers(group).at(-1);
+  if (!last || last === project) return;
+  state.projects.splice(state.projects.indexOf(project), 1);
+  state.projects.splice(state.projects.indexOf(last) + 1, 0, project);
+  project.groupId = group.id;
+  regroup();
+}
+
+/** Takes a project out of its group, placing it right after the group so the others stay where they are. */
+function leaveGroup(project: ProjectState) {
+  const group = groupOf(project);
+  if (!group) return;
+  const last = groupMembers(group).at(-1)!;
+  if (last !== project) {
+    state.projects.splice(state.projects.indexOf(project), 1);
+    state.projects.splice(state.projects.indexOf(last) + 1, 0, project);
+  }
+  project.groupId = undefined;
+  regroup();
+}
+
+function ungroup(group: ProjectGroup) {
+  for (const p of groupMembers(group)) p.groupId = undefined;
+  regroup();
+}
+
+function toggleGroup(group: ProjectGroup) {
+  group.collapsed = !group.collapsed || undefined;
+  renderTabs();
+  save();
+}
+
+/** Renames a group on its tab; an empty name leaves only its colour. */
+function renameGroup(group: ProjectGroup) {
+  const name = groupTabEls.get(group.id)?.querySelector<HTMLElement>('.tgroup-name');
+  if (!name) return;
+  editText(name, group.name, (text) => {
+    if (text !== null) group.name = text;
+    renderTabs();
+    save();
+  });
+}
+
+function closeGroup(group: ProjectGroup) {
+  const members = groupMembers(group);
+  const busy = members.filter(projectBusy).map((p) => p.name);
+  if (busy.length && !confirm(`${busy.join(', ')} ${busy.length === 1 ? 'has' : 'have'} sessions still working. Close the group's projects?`)) return;
+  for (const p of members) closeProject(p, { ask: false });
+}
+
+async function groupMenu(group: ProjectGroup, at: MenuAnchor) {
+  const choice = await showMenu(
+    [
+      { label: 'Rename…', id: 'rename' },
+      {
+        label: 'Color',
+        submenu: GROUP_COLORS.map(([color, label, css]) => ({ label, id: `color:${color}`, swatch: css, checked: color === group.color })),
+      },
+      { label: group.collapsed ? 'Expand' : 'Collapse', id: 'collapse' },
+      'separator',
+      { label: 'Add Project to Group…', id: 'add' },
+      'separator',
+      { label: 'Ungroup', id: 'ungroup' },
+      { label: 'Close Group', id: 'close' },
+    ],
+    at,
+  );
+  // The group may have gone while the menu was open.
+  if (!choice || !state.groups.includes(group)) return;
+  if (choice.startsWith('color:')) {
+    group.color = choice.slice('color:'.length) as GroupColor;
+    renderTabs();
+    save();
+    return;
+  }
+  switch (choice) {
+    case 'rename':
+      return renameGroup(group);
+    case 'collapse':
+      return toggleGroup(group);
+    case 'add':
+      return void addProject(group);
+    case 'ungroup':
+      return ungroup(group);
+    case 'close':
+      return closeGroup(group);
+  }
 }
 
 function setProjectName(project: ProjectState, name: string) {
@@ -1141,21 +1444,55 @@ async function detectIcon(project: ProjectState) {
   save();
 }
 
-async function projectMenu(project: ProjectState) {
+async function projectMenu(project: ProjectState, at: MenuAnchor) {
   const others = state.projects.filter((p) => p !== project);
-  const choice = await api.projectMenu({
-    renamed: project.name !== folderName(project.path),
-    folded: Boolean(project.folded),
-    othersUnfolded: others.some((p) => !p.folded),
-    anyFolded: state.projects.some((p) => p.folded),
-  });
+  const otherGroups = state.groups.filter((g) => g.id !== project.groupId);
+  const entries: MenuEntry[] = [{ label: 'Rename…', id: 'rename' }];
+  if (project.name !== folderName(project.path)) entries.push({ label: 'Use Folder Name', id: 'reset-name' });
+  entries.push(
+    'separator',
+    otherGroups.length
+      ? {
+          label: project.groupId ? 'Move to Group' : 'Add to Group',
+          submenu: [
+            { label: 'New Group', id: 'group-new' },
+            'separator',
+            ...otherGroups.map((g) => ({ label: groupLabel(g), id: `group:${g.id}`, swatch: groupColor(g) })),
+          ],
+        }
+      : { label: project.groupId ? 'Move to New Group' : 'Add to New Group', id: 'group-new' },
+  );
+  if (project.groupId) entries.push({ label: 'Remove from Group', id: 'ungroup' });
+  entries.push(
+    'separator',
+    { label: project.folded ? 'Unfold' : 'Fold', id: 'fold' },
+    { label: 'Fold Others', id: 'fold-others', enabled: others.some((p) => !p.folded) },
+    { label: 'Unfold All', id: 'unfold-all', enabled: state.projects.some((p) => p.folded) },
+    'separator',
+    { label: 'Choose Icon…', id: 'icon-choose' },
+    { label: 'Detect Icon Again', id: 'icon-detect' },
+    'separator',
+    { label: 'Reveal in Finder', id: 'reveal' },
+    'separator',
+    { label: 'Close Project', id: 'close' },
+  );
+  const choice = await showMenu(entries, at);
   // The project may have been closed while the menu was open.
-  if (!state.projects.includes(project)) return;
+  if (!choice || !state.projects.includes(project)) return;
+  if (choice.startsWith('group:')) {
+    const group = state.groups.find((g) => g.id === choice.slice('group:'.length));
+    if (group) joinGroup(project, group);
+    return;
+  }
   switch (choice) {
     case 'rename':
       return renameProject(project);
     case 'reset-name':
       return setProjectName(project, folderName(project.path));
+    case 'group-new':
+      return createGroup(project);
+    case 'ungroup':
+      return leaveGroup(project);
     case 'fold':
       return foldProjects([project], !project.folded);
     case 'fold-others':
@@ -1188,7 +1525,7 @@ function activateProject(id: string | null) {
     // Sessions start the first time their project is opened, so a long project list stays cheap.
     for (const pane of project.panes) {
       const v = views.get(pane.id)!;
-      if (!v.spawned) void spawn(v, pane.kind === 'claude' && pane.started);
+      if (!v.spawned) void spawn(v, continues(pane));
     }
     for (const paneId of panesIn(project.layout)) scheduleFit(views.get(paneId)!);
     // Older states can still point at a pane that was closed.
@@ -1227,19 +1564,22 @@ function createProject(dir: string): ProjectState {
   return project;
 }
 
-async function addProject() {
+/** Picked from a group's menu, the folder goes into that group, even when it is already open. */
+async function addProject(group?: ProjectGroup) {
   const dir = await api.pickFolder();
   if (!dir) return;
   const existing = state.projects.find((p) => p.path === dir);
-  if (existing) return activateProject(existing.id);
-  const project = createProject(dir);
+  const project = existing ?? createProject(dir);
+  if (group && state.groups.includes(group) && project.groupId !== group.id) joinGroup(project, group);
   activateProject(project.id);
-  addPane('claude', project);
+  if (!existing) addPane('claude', project);
 }
 
-function closeProject(project: ProjectState) {
-  const busy = project.panes.some((p) => ['running', 'attention'].includes(views.get(p.id)?.status ?? ''));
-  if (busy && !confirm(`${project.name} has sessions still working. Close the project?`)) return;
+const projectBusy = (project: ProjectState) => project.panes.some((p) => views.has(p.id) && isWorking(views.get(p.id)!));
+
+/** `ask: false` skips the question about working sessions when the caller already asked. */
+function closeProject(project: ProjectState, { ask = true } = {}) {
+  if (ask && projectBusy(project) && !confirm(`${project.name} has sessions still working. Close the project?`)) return;
   for (const pane of project.panes) {
     const v = views.get(pane.id);
     if (!v) continue;
@@ -1253,6 +1593,8 @@ function closeProject(project: ProjectState) {
   stages.delete(project.id);
   const i = state.projects.indexOf(project);
   state.projects.splice(i, 1);
+  // A group left empty goes with its last project.
+  normalizeGroups();
   if (state.activeProjectId === project.id) activateProject(state.projects[Math.min(i, state.projects.length - 1)]?.id ?? null);
   else renderTabs();
   renderSessions();
@@ -1482,7 +1824,7 @@ function renderTasks() {
   }
   apOffBtn.classList.toggle('on', !project.autopilot.on);
   apOnBtn.classList.toggle('on', project.autopilot.on);
-  apLimit.value = String(project.autopilot.limit);
+  apLimit.set(String(project.autopilot.limit));
 
   // Rebuilding must not take the caret away from a card's notes field.
   const active = document.activeElement instanceof HTMLTextAreaElement ? document.activeElement : null;
@@ -1535,11 +1877,11 @@ function setAutopilot(on: boolean) {
 // A row's menu closes, archives or deletes its session. Archiving is Liszt's own: it never writes
 // to the Claude app's files, and it keeps the title and folder of a session listed nowhere else.
 
-const STATUS_ORDER: Record<Status, number> = { attention: 0, running: 1, starting: 2, idle: 3, exited: 4 };
-/** Replies waiting to be read sort right after the running sessions. */
-const UNREAD_RANK = 1.5;
+const STATUS_ORDER: Record<Status, number> = { attention: 0, running: 1, waiting: 2, starting: 3, idle: 4, exited: 5 };
+/** Replies waiting to be read sort right after the working sessions. */
+const UNREAD_RANK = 2.5;
 /** Sessions nothing runs sort after every running one. */
-const NOT_RUNNING = 5;
+const NOT_RUNNING = 6;
 const sessionChips = new Map<string, HTMLElement>();
 /** Sessions being closed or deleted, with what the row says meanwhile. */
 const pendingSessions = new Map<string, string>();
@@ -1747,24 +2089,30 @@ function renderSessionRow(r: SessionRow): HTMLElement {
   row.append(top, h('div', 'srow-where', r.where), h('div', 'srow-activity', pending ?? r.detail));
   row.title = r.tooltip;
   row.addEventListener('click', (e) => {
-    if (more.contains(e.target as Node)) void sessionRowMenu(r);
+    if (more.contains(e.target as Node)) void sessionRowMenu(r, more);
     else r.open?.();
   });
   row.addEventListener('contextmenu', (e) => {
     e.preventDefault();
-    void sessionRowMenu(r);
+    void sessionRowMenu(r, pointer(e));
   });
   return row;
 }
 
-async function sessionRowMenu(r: SessionRow) {
+async function sessionRowMenu(r: SessionRow, at: MenuAnchor) {
   if (pendingSessions.has(r.sessionId)) return;
-  const choice = await api.sessionRowMenu({
-    inLiszt: Boolean(r.view),
-    canOpen: Boolean(r.open),
-    canClose: Boolean(r.view) || r.live,
-    archived: r.archived,
-  });
+  const canClose = Boolean(r.view) || r.live;
+  const choice = await showMenu(
+    [
+      { label: r.view ? 'Show Session' : 'Open in Liszt', id: 'open', enabled: Boolean(r.open) },
+      'separator',
+      { label: 'Close Session', id: 'close', enabled: canClose },
+      r.archived ? { label: 'Unarchive', id: 'unarchive' } : { label: canClose ? 'Close and Archive' : 'Archive', id: 'archive' },
+      'separator',
+      { label: 'Delete Session…', id: 'delete', danger: true },
+    ],
+    at,
+  );
   // Its pane may have been closed while the menu was open.
   if (r.view && views.get(r.view.pane.id) !== r.view) return;
   switch (choice) {
@@ -1847,7 +2195,7 @@ function renderSessions() {
   const shown = all.filter(
     (r) => FILTERS[state.sessionFilter](r) && terms.every((t) => fold(`${r.title} ${r.project} ${r.where} ${r.detail} ${r.tooltip}`).includes(t)),
   );
-  const working = all.filter((r) => r.live && r.rank <= STATUS_ORDER.running).length;
+  const working = all.filter((r) => r.live && r.rank <= STATUS_ORDER.waiting).length;
   sessionsCountEl.textContent = `${working} working · ${shown.length === all.length ? all.length : `${shown.length} of ${all.length}`}`;
 
   const byProject = state.sessionSort === 'project';
@@ -1890,14 +2238,18 @@ function onAppSessions(list: AppSession[]) {
   renderSessions();
 }
 
-/** An attached pane gets no hooks unless its session was started by Liszt, so it shows the listed status instead. */
+/**
+ * A background session shows its listed status until a hook arrives: one Liszt did not start sends
+ * none, and one that kept working while Liszt was closed sends the next only when something happens.
+ * Sessions of projects not opened since launch run unattached and show it too.
+ */
 function syncAttached(v: PaneView) {
-  if (!v.attached || v.hooked || v.status === 'exited') return;
+  if (v.hooked || v.status === 'exited' || !(v.attached || (!v.spawned && v.pane.bgId))) return;
   const a = agents.find((x) => x.sessionId === v.pane.sessionId);
   if (!a) return;
   const status: Status = a.status === 'busy' ? 'running' : 'idle';
   if (status === v.status) return;
-  if (status === 'idle' && v.status === 'running') finishTurn(v);
+  if (status === 'idle' && (v.status === 'running' || v.pane.working)) finishTurn(v);
   else setStatus(v, status);
 }
 
@@ -1949,6 +2301,12 @@ function onHook(ev: HookEvent) {
       break;
     case 'UserPromptSubmit':
       v.pane.started = true;
+      if (TASK_NOTIFICATION.test(ev.prompt ?? '')) {
+        // A background task finished and Claude takes it up: the same piece of work goes on.
+        v.activity = TASK_SUMMARY.exec(ev.prompt!)?.[1].trim() || 'Background task finished';
+        setStatus(v, 'running', v.status === 'waiting');
+        break;
+      }
       v.actions = 0;
       if (ev.prompt) {
         const line = ev.prompt.split('\n')[0];
@@ -1975,7 +2333,11 @@ function onHook(ev: HookEvent) {
       }
       break;
     case 'Stop':
-      if (v.status === 'running' || v.status === 'attention') {
+      if ((v.status === 'running' || v.status === 'attention') && ev.tasks?.length) {
+        // Not finished: Claude takes the work up again when its background tasks end.
+        v.activity = waitingOn(ev.tasks);
+        setStatus(v, 'waiting', true);
+      } else if (v.status === 'running' || v.status === 'attention') {
         const took = duration(Date.now() - v.since);
         v.activity = `Finished in ${took}${v.actions ? ` · ${v.actions} tool ${v.actions === 1 ? 'call' : 'calls'}` : ''}`;
         finishTurn(v);
@@ -1988,9 +2350,19 @@ function onHook(ev: HookEvent) {
   if (task) {
     if (v.pane.started) task.sessionId = v.pane.sessionId;
     if (ev.event === 'UserPromptSubmit' && task.status === 'review') setTaskStatus(v.project, task, 'doing');
-    if (ev.event === 'Stop' && task.status === 'doing') setTaskStatus(v.project, task, 'review');
+    if (ev.event === 'Stop' && !ev.tasks?.length && task.status === 'doing') setTaskStatus(v.project, task, 'review');
   }
   save();
+}
+
+/** The prompt Claude Code submits itself when a background task ends, and the line that says how. */
+const TASK_NOTIFICATION = /^\s*<task-notification>/;
+const TASK_SUMMARY = /<summary>([^<]*)<\/summary>/;
+
+/** What a session waits on, for its activity line. */
+function waitingOn(tasks: BackgroundTask[]): string {
+  if (tasks.length > 1) return `Waiting on ${tasks.length} background tasks`;
+  return `Waiting on ${tasks[0].type === 'shell' ? 'shell' : 'background task'} · ${tasks[0].label}`;
 }
 
 // --- Git sidebar -------------------------------------------------------------------------------
@@ -2089,6 +2461,8 @@ function setFontSize(size: number) {
 // --- Wiring ------------------------------------------------------------------------------------
 
 function onMenu(command: string) {
+  // A shortcut acts on the app as it is, not on what an open menu was about.
+  closeMenu();
   const focused = focusedPaneId ? views.get(focusedPaneId) : undefined;
   if (command.startsWith('project-')) {
     const project = state.projects[Number(command.slice('project-'.length))];
@@ -2191,25 +2565,8 @@ sessionSearch.addEventListener('keydown', (e) => {
     focusPane(focusedPaneId);
   }
 });
-sessionFilterEl.addEventListener('change', () => {
-  state.sessionFilter = sessionFilterEl.value as SessionFilter;
-  renderSessions();
-  save();
-});
-sessionSortEl.addEventListener('change', () => {
-  state.sessionSort = sessionSortEl.value as SessionSort;
-  renderSessions();
-  save();
-});
 apOffBtn.addEventListener('click', () => setAutopilot(false));
 apOnBtn.addEventListener('click', () => setAutopilot(true));
-apLimit.addEventListener('change', () => {
-  const project = activeProject();
-  if (!project) return;
-  project.autopilot.limit = Number(apLimit.value);
-  save();
-  void pump(project);
-});
 taskInput.addEventListener('keydown', (e) => {
   if (e.key !== 'Enter' || e.isComposing) return;
   const title = taskInput.value.trim();
@@ -2221,7 +2578,7 @@ window.addEventListener('focus', () => void refreshGit());
 setInterval(() => void refreshGit(), 5000);
 setInterval(() => {
   for (const v of views.values()) {
-    if (v.status !== 'running') continue;
+    if (v.status !== 'running' && v.status !== 'waiting') continue;
     renderChip(v);
     const chip = sessionChips.get(v.pane.id);
     if (chip) paintChip(chip, v);
@@ -2246,13 +2603,16 @@ async function boot() {
       if (task.status === 'doing' && !hasPane) task.status = task.cwd ? 'review' : 'todo';
     }
   }
+  // Older states have no groups.
+  state.groups ??= [];
+  normalizeGroups();
   // Older states kept the Changes panel as a boolean.
   const side: unknown = state.sidebar;
   setSidebar(side === true || side === 'changes' ? 'changes' : side === 'sessions' ? 'sessions' : null);
   if (!(state.sessionFilter in FILTERS)) state.sessionFilter = 'active';
   if (!(state.sessionSort in SORTS)) state.sessionSort = 'status';
-  sessionFilterEl.value = state.sessionFilter;
-  sessionSortEl.value = state.sessionSort;
+  sessionFilter.set(state.sessionFilter);
+  sessionSort.set(state.sessionSort);
   setTasksPanel(state.tasksPanel);
   for (const project of state.projects) {
     for (const pane of project.panes) createView(project, pane);
@@ -2265,7 +2625,7 @@ async function boot() {
   for (const project of state.projects) {
     for (const task of project.tasks) {
       const v = task.status === 'doing' && task.paneId ? views.get(task.paneId) : undefined;
-      if (v && !v.spawned) void spawn(v, v.pane.started);
+      if (v && !v.spawned) void spawn(v, continues(v.pane));
     }
     void pump(project);
   }
