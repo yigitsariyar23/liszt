@@ -3,7 +3,7 @@
   "productName": "Liszt",
   "version": "0.1.0",
   "private": true,
-  "description": "Claude Code oturumlarını proje sekmeleri ve panellerde çalıştıran kişisel terminal",
+  "description": "A personal terminal that runs Claude Code sessions in project tabs and split panes",
   "main": "dist/main.js",
   "scripts": {
     "build": "node scripts/build.mjs",
