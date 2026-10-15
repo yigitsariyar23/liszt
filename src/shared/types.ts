@@ -125,6 +125,8 @@ export interface SessionMark {
   deleted?: boolean;
   /** Unread while no Liszt pane has the session: marked so from its row, or its pane closed unread. Opening it reads it. */
   unread?: boolean;
+  /** Its work went out: pushed to the remote, or its pull request merged. Cleared by the next prompt. */
+  shipped?: 'pushed' | 'merged';
   /** Kept on archiving: a closed Liszt pane or an interactive session is listed nowhere else. */
   title?: string;
   cwd?: string;
@@ -164,7 +166,8 @@ export interface AgentSession {
   kind: 'interactive' | 'background';
   name: string;
   cwd: string;
-  status: 'idle' | 'busy';
+  /** `waiting`: stopped on a permission or a question in the middle of a turn. */
+  status: 'idle' | 'busy' | 'waiting';
   /** Background sessions only, e.g. `blocked` while waiting for a prompt or a permission. */
   state?: string;
   /** A background session Claude Code no longer runs (done or stopped); `claude attach` wakes it. */
@@ -223,6 +226,8 @@ export interface HookEvent {
   /** PostToolUse: the tool and a short description of what it touched. */
   tool?: string;
   detail?: string;
+  /** PostToolUse of Bash: the command as Claude ran it. */
+  command?: string;
   /** Stop: background tasks still running, which start another turn when they finish. */
   tasks?: BackgroundTask[];
 }

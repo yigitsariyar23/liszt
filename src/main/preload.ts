@@ -42,7 +42,7 @@ const api = {
   onExit: (cb: (id: string, code: number) => void) => on('pty:exit', cb),
   onBackground: (cb: (id: string, bgId: string) => void) => on('pty:background', cb),
   onHook: (cb: (ev: HookEvent) => void) => on('hook', cb),
-  onAgents: (cb: (list: AgentSession[]) => void) => on('agents', cb),
+  onAgents: (cb: (list: AgentSession[], asked: number) => void) => on('agents', cb),
   onAppSessions: (cb: (list: AppSession[]) => void) => on('app-sessions', cb),
   onTranscriptSessions: (cb: (list: TranscriptSession[]) => void) => on('transcript-sessions', cb),
   onMenu: (cb: (command: string) => void) => on('menu', cb),

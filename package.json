@@ -10,7 +10,8 @@
     "start": "npm run build && electron .",
     "typecheck": "tsc --noEmit",
     "postinstall": "chmod +x node_modules/node-pty/prebuilds/*/spawn-helper",
-    "dist:mac": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dir --arm64"
+    "dist:mac": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dir --arm64",
+    "deploy": "bash scripts/deploy.sh"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

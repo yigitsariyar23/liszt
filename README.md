@@ -175,9 +175,17 @@ ditto release/mac-arm64/Liszt.app /Applications/Liszt.app
   olayı `127.0.0.1` üzerindeki token korumalı sunucuya yollar. Adresi o an `<userData>/hook-url`
   dosyasından okur (dosyayı yalnızca kullanıcı okuyabilir). Böylece önceki açılışta başlamış oturumlar
   da şimdiki Liszt'e ulaşır; Liszt kapalıyken dosya yoktur ve hook bir şey göndermez. Panel etiketleri
-  (Running · 1m / Waiting · 1m / Needs you / Unread / Idle) buradan gelir. Yeniden bağlanan panel ilk
+  (Running · 1m / Waiting · 1m / Needs you / Unread / Pushed / Merged / Idle) buradan gelir. Pushed ve
+  Merged, oturumda başarılı bir `git push` ya da `gh pr merge` Bash çağrısı olduğunda boşta duran
+  oturumda Idle'ın yerine gelir; yeni bir prompt gönderilince kalkar. Yeniden bağlanan panel ilk
   hook gelene kadar durumunu `claude agents` listesinden alır. Liszt'in başlatmadığı oturumlar hook
   göndermez; onların durumu her zaman bu listeden gelir.
+- Claude çalışırken yazılan prompt Claude Code'un kuyruğunda bekler. Claude onu iki araç çağrısı
+  arasında almazsa, tur bitince yeni bir tur başlatır. Ama `UserPromptSubmit`'i yazıldığı anda, önceki
+  turun `Stop`'undan önce gelir; yeni turu hiçbir hook duyurmaz. Bu yüzden Idle görünen panel, bir araç
+  çalışınca (`PostToolUse`) ya da `claude agents` oturumu meşgul listeleyince Running'e geçer. Liste her
+  `Stop`'tan 3 saniye sonra ayrıca sorulur, böylece bu geçiş birkaç saniye sürer. Yalnızca listeden
+  yakalanan bir tur, hook gelmeden liste oturumu boşta gösterirse geri alınır.
 - `<userData>/claude-settings.json` yalnızca eski sürümlerin arka plana aldığı oturumlar uyandırılırken
   bulunsun diye yazılır.
 - Paneller, projeler ve oturum kimlikleri `~/Library/Application Support/Liszt/state.json` içinde

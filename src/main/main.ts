@@ -160,10 +160,14 @@ function startHookServer(): Promise<string> {
         message: str('message'),
         tool: str('tool_name'),
         detail: toolDetail(payload.tool_input),
+        command: bashCommand(payload.tool_name, payload.tool_input),
         tasks: runningTasks(payload.background_tasks),
       };
       if (process.env.LISZT_DEBUG) console.log('[hook]', paneId, ev.event, ev.source ?? '');
       send('hook', ev);
+      // A prompt typed during the turn may start the next one now, which no hook announces and only
+      // the agents list shows; ask for it once Claude Code's busy flag has settled.
+      if (ev.event === 'Stop') setTimeout(() => void pollAgents(), AGENTS_AFTER_STOP);
     });
   });
   return new Promise((resolve) => {
@@ -207,6 +211,13 @@ function toolDetail(input: unknown): string | undefined {
   if (file) return path.basename(file);
   const text = str('command') || str('pattern') || str('description') || str('url') || str('query') || str('path');
   return text ? text.split('\n')[0].slice(0, 80) : undefined;
+}
+
+/** The whole command of a Bash call, so a push or a merge in a chain of commands is still seen. */
+function bashCommand(tool: unknown, input: unknown): string | undefined {
+  if (tool !== 'Bash' || !input || typeof input !== 'object') return undefined;
+  const command = (input as Record<string, unknown>).command;
+  return typeof command === 'string' ? command.slice(0, 2000) : undefined;
 }
 
 // --- Terminals ---------------------------------------------------------------------------------
@@ -361,6 +372,8 @@ ipcMain.on('pty:kill', (_e, id: string) => {
 // the pane's process.
 
 const AGENTS_INTERVAL = 10_000;
+/** Past the renderer's STOP_SETTLE, so the list counts. */
+const AGENTS_AFTER_STOP = 3000;
 
 function parseAgents(raw: unknown): AgentSession[] {
   if (!Array.isArray(raw)) return [];
@@ -381,7 +394,7 @@ function parseAgents(raw: unknown): AgentSession[] {
       kind: background ? 'background' : 'interactive',
       name: str('name') ?? '',
       cwd,
-      status: fields.status === 'busy' ? 'busy' : 'idle',
+      status: fields.status === 'busy' || fields.status === 'waiting' ? fields.status : 'idle',
       state,
       // The same test Claude Code uses to leave a session out unless `--all` is given.
       ended: background && fields.pid === undefined && state !== 'working' && state !== 'blocked',
@@ -672,8 +685,10 @@ async function pollAgents() {
   pollingAgents = true;
   try {
     // Each list goes out as soon as it is ready: the first read of the transcripts takes a moment.
+    // The agents list says when it was asked for, so the renderer can tell it from a hook it predates.
+    const asked = Date.now();
     await Promise.all([
-      listAgents().then((list) => list && send('agents', list)),
+      listAgents().then((list) => list && send('agents', list, asked)),
       listAppSessions().then((list) => send('app-sessions', list), () => {}),
       listTranscriptSessions().then((list) => send('transcript-sessions', list), () => {}),
     ]);

@@ -16,6 +16,15 @@
   --yellow: #e2b84f;
   --red: #e36d6d;
   --blue: #6fa3e6;
+  /* Session status colors, one hue each so no two read alike (dots, chips, rows). */
+  --st-idle: #7f7f88;
+  --st-running: #6fa3e6;
+  --st-attention: #e86fc0;
+  --st-waiting: #e2b84f;
+  --st-exited: #e36d6d;
+  --st-unread: #a3d46a;
+  --st-pushed: #4fd1c5;
+  --st-merged: #b07cff;
   --mono: 'JetBrains Mono', 'SF Mono', SFMono-Regular, Menlo, monospace;
   color-scheme: dark;
 }
@@ -88,30 +97,41 @@ body.resizing-row * {
 }
 
 .dot.running {
-  border-color: var(--blue);
-  background: var(--blue);
+  border-color: var(--st-running);
+  background: var(--st-running);
   animation: pulse 1.2s ease-in-out infinite;
 }
 
 .dot.attention {
-  border-color: var(--accent);
-  background: var(--accent);
+  border-color: var(--st-attention);
+  background: var(--st-attention);
 }
 
 /* Claude's turn is over but its background commands still run; it goes on when they end. */
 .dot.waiting {
-  border-color: var(--yellow);
+  border-color: var(--st-waiting);
   animation: pulse 2.4s ease-in-out infinite;
 }
 
 .dot.exited {
-  border-color: var(--red);
+  border-color: var(--st-exited);
 }
 
 /* Claude answered and nobody has looked yet. */
 .dot.unread {
-  border-color: var(--green);
-  background: var(--green);
+  border-color: var(--st-unread);
+  background: var(--st-unread);
+}
+
+/* Claude's work went out: pushed to the remote, or its pull request merged. */
+.dot.pushed {
+  border-color: var(--st-pushed);
+  background: var(--st-pushed);
+}
+
+.dot.merged {
+  border-color: var(--st-merged);
+  background: var(--st-merged);
 }
 
 /* Top bar: project stacks --------------------------------------------------------------------- */
@@ -882,51 +902,68 @@ body[data-side='sessions'] #sessions-view {
 }
 
 .chip.idle::before {
-  background: var(--green);
+  background: var(--st-idle);
 }
 
 .chip.running {
-  color: var(--blue);
+  color: var(--st-running);
 }
 
 .chip.running::before {
-  background: var(--blue);
+  background: var(--st-running);
   animation: pulse 1.2s ease-in-out infinite;
 }
 
 .chip.attention {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+  color: var(--st-attention);
+  border-color: color-mix(in srgb, var(--st-attention) 60%, var(--border));
 }
 
 .chip.attention::before {
-  background: var(--accent);
+  background: var(--st-attention);
 }
 
 .chip.waiting {
-  color: var(--yellow);
+  color: var(--st-waiting);
 }
 
 .chip.waiting::before {
-  background: var(--yellow);
+  background: var(--st-waiting);
   animation: pulse 2.4s ease-in-out infinite;
 }
 
 .chip.exited {
-  color: var(--red);
-}
-
-.chip.unread {
-  color: var(--green);
-  border-color: color-mix(in srgb, var(--green) 60%, var(--border));
-}
-
-.chip.unread::before {
-  background: var(--green);
+  color: var(--st-exited);
 }
 
 .chip.exited::before {
-  background: var(--red);
+  background: var(--st-exited);
+}
+
+.chip.unread {
+  color: var(--st-unread);
+  border-color: color-mix(in srgb, var(--st-unread) 60%, var(--border));
+}
+
+.chip.unread::before {
+  background: var(--st-unread);
+}
+
+/* Claude's work went out: pushed to the remote, or its pull request merged. */
+.chip.pushed {
+  color: var(--st-pushed);
+}
+
+.chip.pushed::before {
+  background: var(--st-pushed);
+}
+
+.chip.merged {
+  color: var(--st-merged);
+}
+
+.chip.merged::before {
+  background: var(--st-merged);
 }
 
 .pane-actions {
@@ -1353,7 +1390,7 @@ button.task-section-head:hover {
 }
 
 .srow.attention {
-  background: var(--accent-dim);
+  background: color-mix(in srgb, var(--st-attention) 14%, transparent);
 }
 
 .srow-top {

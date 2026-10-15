@@ -21,6 +21,7 @@ import type {
   ProjectGroup,
   ProjectState,
   SessionFilter,
+  SessionMark,
   SessionSort,
   SidebarView,
   TaskState,
@@ -69,6 +70,8 @@ interface PaneView {
   attached: boolean;
   /** A hook arrived since the last spawn, so hooks drive the status. */
   hooked: boolean;
+  /** Running only because Claude Code listed the session busy, with no hook since: the activity before (see catchTurn). */
+  unannounced?: string;
   /** When Claude was asked to name the session; the next terminal title is the name. */
   renaming?: number;
 }
@@ -409,6 +412,7 @@ async function spawn(v: PaneView, resume: boolean, prompt?: string) {
   v.exitCode = null;
   v.attached = false;
   v.hooked = false;
+  v.unannounced = undefined;
   setStatus(v, v.pane.kind === 'claude' ? 'starting' : 'idle');
   try {
     v.fit.fit();
@@ -487,6 +491,11 @@ function renderTitle(v: PaneView) {
   paintSessionTab(v);
 }
 
+/** An idle session whose work went out shows that instead of Idle. */
+const SHIPPED_TEXT: Record<NonNullable<SessionMark['shipped']>, string> = { pushed: 'Pushed', merged: 'Merged' };
+const shippedOf = (sessionId: string | undefined) => (sessionId ? state.sessionMarks[sessionId]?.shipped : undefined);
+const shownShipped = (v: PaneView) => (v.status === 'idle' && !isUnread(v) ? shippedOf(v.pane.sessionId) : undefined);
+
 function chipText(v: PaneView): string {
   switch (v.status) {
     case 'running':
@@ -496,7 +505,7 @@ function chipText(v: PaneView): string {
     case 'waiting':
       return `Waiting · ${duration(Date.now() - v.since)}`;
     case 'idle':
-      return isUnread(v) ? 'Unread' : 'Idle';
+      return isUnread(v) ? 'Unread' : (shownShipped(v) ? SHIPPED_TEXT[shownShipped(v)!] : 'Idle');
     case 'exited':
       return v.exitCode ? `Exited (${v.exitCode})` : 'Exited';
     default:
@@ -504,7 +513,7 @@ function chipText(v: PaneView): string {
   }
 }
 
-const chipClass = (v: PaneView) => `chip ${isUnread(v) ? 'unread' : v.status}`;
+const chipClass = (v: PaneView) => `chip ${isUnread(v) ? 'unread' : shownShipped(v) ?? v.status}`;
 
 function paintChip(el: HTMLElement, v: PaneView) {
   el.className = chipClass(v);
@@ -528,7 +537,11 @@ function renderChip(v: PaneView) {
  */
 const isUnread = (v: PaneView) => Boolean(v.pane.unread) && (v.status === 'idle' || !v.spawned);
 
-const dotClass = (v: PaneView) => (isUnread(v) ? 'unread' : ['running', 'attention', 'waiting', 'exited'].includes(v.status) ? v.status : '');
+const dotClass = (v: PaneView) => {
+  if (isUnread(v)) return 'unread';
+  if (['running', 'attention', 'waiting', 'exited'].includes(v.status)) return v.status;
+  return shownShipped(v) ?? '';
+};
 
 /** The user is looking at this session right now, so a reply it gets is read as it arrives. */
 const watching = (v: PaneView) => document.hasFocus() && state.activeProjectId === v.project.id && focusedPaneId === v.pane.id;
@@ -1969,6 +1982,8 @@ const sessionChips = new Map<string, HTMLElement>();
 const pendingSessions = new Map<string, string>();
 
 let agents: AgentSession[] = [];
+/** When `agents` was asked for. */
+let agentsAsked = 0;
 let appSessions: AppSession[] = [];
 let transcriptSessions: TranscriptSession[] = [];
 
@@ -2046,8 +2061,26 @@ function markUnread(sessionId: string, unread: boolean) {
   if (Boolean(mark?.unread) === unread) return;
   if (unread) state.sessionMarks[sessionId] = { ...mark, unread, at: mark?.at ?? Date.now() };
   // A mark that said nothing else goes.
-  else if (mark.archived === undefined && !mark.deleted && !mark.cwd) delete state.sessionMarks[sessionId];
+  else if (mark.archived === undefined && !mark.deleted && !mark.cwd && !mark.shipped) delete state.sessionMarks[sessionId];
   else mark.unread = undefined;
+}
+
+/** Records what went out of a session, or clears it (no value) when the session starts new work. */
+function markShipped(sessionId: string, shipped?: SessionMark['shipped']) {
+  const mark = state.sessionMarks[sessionId];
+  if (mark?.shipped === shipped) return;
+  if (shipped) state.sessionMarks[sessionId] = { ...mark, shipped, at: mark?.at ?? Date.now() };
+  else if (mark.archived === undefined && !mark.deleted && !mark.cwd && !mark.unread) delete state.sessionMarks[sessionId];
+  else mark.shipped = undefined;
+  save();
+}
+
+/** A merge outranks a push: `gh pr merge` ends the work, a `git push` before it is only part of it. */
+const PUSH = /\bgit\s+push\b/;
+const MERGE = /\bgh\s+pr\s+merge\b/;
+function shippedBy(command: string): SessionMark['shipped'] | undefined {
+  if (MERGE.test(command)) return 'merged';
+  return PUSH.test(command) ? 'pushed' : undefined;
 }
 
 /** A pane that goes away leaves its session as unread as it was, for its row under Not running. */
@@ -2114,11 +2147,15 @@ function sessionRows(): SessionRow[] {
       archived: isArchived(a.sessionId, s?.archived),
       unread: isMarkedUnread(a.sessionId),
       live: !a.ended,
-      dot: busy ? 'running' : '',
+      dot: busy ? 'running' : shippedOf(a.sessionId) && !a.ended ? shippedOf(a.sessionId)! : '',
       // Ended background sessions are done, stopped or failed; they stay openable, so they stay listed.
       chip: a.ended
         ? [`chip ${a.state === 'failed' ? 'exited' : ''}`, capitalize(a.state ?? 'ended')]
-        : [`chip ${busy ? 'running' : 'idle'}`, busy ? 'Busy' : 'Idle'],
+        : busy
+          ? ['chip running', 'Busy']
+          : shippedOf(a.sessionId)
+            ? [`chip ${shippedOf(a.sessionId)}`, SHIPPED_TEXT[shippedOf(a.sessionId)!]]
+            : ['chip idle', 'Idle'],
       tooltip: `${a.cwd}\nClick to open in Liszt (${bgId ? `claude attach ${bgId}` : 'claude --resume'})`,
       open: () => openSession(a.cwd, a.sessionId, named, bgId),
     });
@@ -2399,10 +2436,16 @@ function onTranscriptSessions(list: TranscriptSession[]) {
 /**
  * A background session shows its listed status until a hook arrives: one Liszt did not start sends
  * none, and one that kept working while Liszt was closed sends the next only when something happens.
- * Sessions of projects not opened since launch run unattached and show it too.
+ * Sessions of projects not opened since launch run unattached and show it too. Once hooks drive the
+ * status, the list only catches turns they miss.
  */
 function syncAttached(v: PaneView) {
-  if (v.hooked || v.status === 'exited' || !(v.attached || (!v.spawned && v.pane.bgId))) return;
+  if (v.status === 'exited') return;
+  if (v.hooked) {
+    catchTurn(v);
+    return;
+  }
+  if (!(v.attached || (!v.spawned && v.pane.bgId))) return;
   const a = agents.find((x) => x.sessionId === v.pane.sessionId);
   if (!a) return;
   const status: Status = a.status === 'busy' ? 'running' : 'idle';
@@ -2411,8 +2454,42 @@ function syncAttached(v: PaneView) {
   else setStatus(v, status);
 }
 
-function onAgents(list: AgentSession[]) {
+/** How long after its Stop hook runs Claude Code may still list the session busy. */
+const STOP_SETTLE = 2000;
+
+/**
+ * A prompt typed while Claude works waits in Claude Code's queue and, unless Claude takes it in
+ * between two tool calls, starts the next turn as soon as this one ends. Its UserPromptSubmit fires
+ * when it is typed, though, before this turn's Stop, so no hook announces that next turn. Claude
+ * Code lists the session busy meanwhile, and its first tool call shows it too. A turn caught only
+ * from the list is taken back when the list shows the session idle before any hook comes.
+ */
+function catchTurn(v: PaneView) {
+  const a = agents.find((x) => x.sessionId === v.pane.sessionId);
+  if (!a) return;
+  if (v.unannounced !== undefined && a.status === 'idle') {
+    v.activity = v.unannounced;
+    v.unannounced = undefined;
+    setStatus(v, 'idle');
+  } else if (v.status === 'idle' && a.status === 'busy' && agentsAsked - v.since > STOP_SETTLE) {
+    const before = v.activity;
+    startTurn(v);
+    v.unannounced = before;
+  }
+}
+
+/** Claude began a turn no UserPromptSubmit announced. */
+function startTurn(v: PaneView) {
+  v.actions = 0;
+  v.activity = 'Working';
+  setStatus(v, 'running');
+  const task = taskOf(v);
+  if (task?.status === 'review') setTaskStatus(v.project, task, 'doing');
+}
+
+function onAgents(list: AgentSession[], asked: number) {
   agents = list;
+  agentsAsked = asked;
   for (const v of views.values()) {
     if (v.pane.kind !== 'claude') continue;
     // A pane whose session went to the background (`/background`) follows it there and attaches to
@@ -2447,6 +2524,7 @@ function onHook(ev: HookEvent) {
   const v = views.get(ev.paneId);
   if (!v) return;
   v.hooked = true;
+  v.unannounced = undefined;
   // /clear and some resumes switch to a new session id; follow it so a restart resumes the right one.
   if (ev.sessionId) v.pane.sessionId = ev.sessionId;
   if (ev.transcriptPath) v.pane.transcript = ev.transcriptPath;
@@ -2466,6 +2544,8 @@ function onHook(ev: HookEvent) {
         break;
       }
       v.actions = 0;
+      // New work: what the last one shipped no longer describes the session.
+      markShipped(v.pane.sessionId);
       if (ev.prompt) {
         const line = ev.prompt.split('\n')[0];
         v.activity = `› ${line}`;
@@ -2477,8 +2557,13 @@ function onHook(ev: HookEvent) {
       setStatus(v, 'running');
       break;
     case 'PostToolUse':
+      // A tool ran, so a turn is under way even if nothing announced it (see catchTurn).
+      if (v.status === 'idle') startTurn(v);
       v.actions += 1;
       v.activity = ev.detail ? `${ev.tool} · ${ev.detail}` : (ev.tool ?? 'Tool');
+      // PostToolUse runs only when the command succeeded, so a push or merge here went out.
+      const shipped = ev.command ? shippedBy(ev.command) : undefined;
+      if (shipped && shippedOf(v.pane.sessionId) !== 'merged') markShipped(v.pane.sessionId, shipped);
       // The user answered a permission prompt and the tool ran.
       if (v.status === 'attention') setStatus(v, 'running', true);
       else renderSessions();
