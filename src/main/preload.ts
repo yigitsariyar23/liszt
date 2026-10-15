@@ -9,6 +9,7 @@ import type {
   ProjectIcon,
   SpawnOptions,
   SpawnResult,
+  TranscriptSession,
   WorktreeResult,
 } from '../shared/types';
 
@@ -43,6 +44,7 @@ const api = {
   onHook: (cb: (ev: HookEvent) => void) => on('hook', cb),
   onAgents: (cb: (list: AgentSession[]) => void) => on('agents', cb),
   onAppSessions: (cb: (list: AppSession[]) => void) => on('app-sessions', cb),
+  onTranscriptSessions: (cb: (list: TranscriptSession[]) => void) => on('transcript-sessions', cb),
   onMenu: (cb: (command: string) => void) => on('menu', cb),
   onFocusPane: (cb: (id: string) => void) => on('focus-pane', cb),
 };

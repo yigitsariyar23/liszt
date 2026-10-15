@@ -117,16 +117,18 @@ export interface AppState {
   sessionMarks: Record<string, SessionMark>;
 }
 
-/** A session archived, unarchived or deleted from the Sessions panel. */
+/** A session archived, unarchived, deleted or marked unread from the Sessions panel. */
 export interface SessionMark {
   /** Liszt's choice, which wins over the Claude app's: false keeps one the app archived out of Archived. */
   archived?: boolean;
   /** Its row stays hidden unless something runs the session again. */
   deleted?: boolean;
+  /** Unread while no Liszt pane has the session: marked so from its row, or its pane closed unread. Opening it reads it. */
+  unread?: boolean;
   /** Kept on archiving: a closed Liszt pane or an interactive session is listed nowhere else. */
   title?: string;
   cwd?: string;
-  /** When it was closed by archiving. */
+  /** When it was closed by archiving, or first marked when it never was. */
   at: number;
 }
 
@@ -189,9 +191,23 @@ export interface AppSession {
   gone?: 'folder' | 'transcript';
 }
 
+/** A Claude Code session found by its transcript, which Claude Code keeps whatever ran the session. */
+export interface TranscriptSession {
+  sessionId: string;
+  /** Its name in Claude Code, else what it was first asked. */
+  title: string;
+  /** The folder it ran in, the one `claude --resume` finds it from. */
+  cwd: string;
+  /** What ran it: `cli` (a terminal, Liszt's panes included), `claude-desktop`, `sdk-cli`… */
+  entrypoint?: string;
+  lastActivityAt: number;
+  /** Its folder no longer exists, so it cannot be resumed. */
+  gone?: boolean;
+}
+
 export type SidebarView = 'changes' | 'sessions';
 
-export type SessionFilter = 'active' | 'liszt' | 'running' | 'pinned' | 'archived' | 'all';
+export type SessionFilter = 'active' | 'liszt' | 'running' | 'unread' | 'pinned' | 'archived' | 'all';
 
 export type SessionSort = 'status' | 'recent' | 'name' | 'project';
 

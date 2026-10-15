@@ -110,20 +110,31 @@ ditto release/mac-arm64/Liszt.app /Applications/Liszt.app
   - **Running elsewhere**: Liszt dışında çalışanlar. Bunlar başka terminaller, Claude masaüstü
     uygulaması ve arka plan oturumlarıdır.
   - **Not running**: Hiçbir sürecin çalıştırmadığı oturumlar. Bunlar bitmiş ya da durdurulmuş arka
-    plan oturumları (örneğin `/open-agents`'ın `agent1`, `agent2` agent'ları) ve Claude masaüstü
-    uygulamasının sakladığı oturumlardır; arşivlenenler (**Archived**) de buradadır.
+    plan oturumları (örneğin `/open-agents`'ın `agent1`, `agent2` agent'ları), Claude masaüstü
+    uygulamasının sakladığı oturumlar ve Claude Code'un konuşma kaydını hâlâ tuttuğu diğer her
+    oturumdur: terminalde çalışıp kapanmış oturumlar, masaüstü uygulamasının artık listelemedikleri,
+    Agent SDK çalıştırmaları ve kapatılmış Liszt panelleri. Satırın alt yazısı oturumu neyin
+    çalıştırdığını söyler (**Terminal**, **Claude app**, **Agent SDK**). Arşivlenenler (**Archived**) de
+    buradadır.
 - Sabitlenen oturumlar grubunun en üstünde, adının önünde turuncu bir iğne simgesiyle durur. Hem
   masaüstü uygulamasında hem `claude agents` görünümünde sabitlenenler bu şekilde gösterilir.
 - Arama kutusu başlık, proje, klasör ve durum metninde arar; büyük/küçük harf ve Türkçe karakter
   farkını önemsemez (`gecis` → "geçiş"). Enter ilk sonucu açar, Esc kutuyu temizler.
-- **Show**: Active (arşivlenmemiş her şey, varsayılan), In Liszt, Running, Pinned, Archived, All.
+- **Show**: Active (arşivlenmemiş ve açılabilen her şey, varsayılan), In Liszt, Running, Unread,
+  Pinned, Archived, All. Klasörü ya da konuşma kaydı silinmiş oturumlar açılamaz; yalnızca All'da
+  görünürler.
   **Sort**: Status (sizi bekleyenler önce), Recent, Name, Project (proje başlıklarıyla gruplar).
 - Satıra tıklayınca Liszt panelinin yerine gidilir. Dışarıdaki bir oturumda ise klasörü proje değilse
   proje olarak eklenir ve oturum yeni bir panelde açılır: arka plan oturumu `claude attach <id>` ile
   (bitmişse uyandırılır, son konuşmasıyla açılır), diğerleri `claude --resume <sessionId>` ile.
-  Klasörü ya da konuşma kaydı silinmiş bir masaüstü oturumu soluk görünür ve açılmaz.
+  Klasörü ya da konuşma kaydı silinmiş bir oturum soluk görünür ve açılmaz.
 - Bir satıra sağ tıklayınca (ya da üzerine gelince sağda beliren **⋯** düğmesine basınca) oturum
   menüsü açılır:
+  - **Mark as Unread / Mark as Read** oturumu sonra dönmek üzere okunmamış işaretler ya da işareti
+    kaldırır; Liszt dışındaki oturumlar için de çalışır. Okunmamış oturum yeşil noktası, kalın
+    başlığı ve **Unread** etiketiyle grubunun en üstüne çıkar (bir şey üzerinde çalışırken durumu
+    görünür, iş bitince yine Unread olur). Oturumu açmak onu okur. Okunmamış bir Liszt paneli
+    kapatılınca oturumu Not running altında okunmamış kalır.
   - **Close Session** oturumu kapatır, konuşma kalır. Liszt panelindeyse panel kapanır. Arka plan
     oturumu `claude stop <id>` ile durdurulur. Başka bir terminalde ya da masaüstü uygulamasında
     çalışan etkileşimli oturumun süreci sonlandırılır (SIGTERM); bunu yapmadan önce Liszt sorar.
@@ -131,8 +142,8 @@ ditto release/mac-arm64/Liszt.app /Applications/Liszt.app
     Active'den çıkar, **Archived** altında görünür, tıklayınca yeniden açılır. **Unarchive** geri alır.
     Arşiv Liszt'in kendisinindir: masaüstü uygulamasının dosyalarına yazılmaz. Liszt'in seçimi
     uygulamanınkinin önüne geçer, yani uygulamada arşivli bir oturum Liszt'te arşivden çıkarılabilir.
-    Kapatılınca başka hiçbir yerde listelenmeyen oturumların (Liszt panelleri, etkileşimli oturumlar)
-    başlığı ve klasörü saklanır, böylece Not running altında **Kept by Liszt** olarak kalırlar.
+    Arşivlenen oturumun başlığı ve klasörü saklanır; Claude Code konuşma kaydını temizlese bile
+    Not running altında **Kept by Liszt** olarak kalır.
   - **Delete Session…** onay ister, oturumu kapatır ve konuşmasını
     (`~/.claude/projects/…/<sessionId>.jsonl` ve yanındaki klasör) Çöp Kutusu'na taşır. Arka plan
     oturumu önce `claude rm <id>` ile silinir; çalışma kaybolacaksa Claude Code worktree'yi bırakır
@@ -164,7 +175,8 @@ ditto release/mac-arm64/Liszt.app /Applications/Liszt.app
 - Paneller, projeler ve oturum kimlikleri `~/Library/Application Support/Liszt/state.json` içinde
   saklanır. Uygulama yeniden açıldığında paneller oturumlarına `claude attach <id>` ile bağlanır. Claude
   Code'un artık tanımadığı oturumlar `claude --bg --resume <id>` ile geri gelir.
-  Sessions'ta arşivlenen ve silinen oturumlar da burada, oturum kimliğiyle `sessionMarks` altında durur.
+  Sessions'ta arşivlenen, silinen ve Liszt dışında okunmamış işaretlenen oturumlar da burada, oturum
+  kimliğiyle `sessionMarks` altında durur.
 - Paneller ancak projesi ilk kez açıldığında başlatılır, böylece çok proje eklemek açılışı yavaşlatmaz.
 - Ana süreç 10 saniyede bir `claude agents --json --all` çalıştırır ve listeyi renderer'a yollar. Bir
   panelin oturumuyla eşleşenler yalnızca In Liszt'te görünür. Agent görünümünün sabitledikleri
@@ -174,6 +186,13 @@ ditto release/mac-arm64/Liszt.app /Applications/Liszt.app
   `cliSessionId` ve `isArchived` buradan, sabitlenenler `claude_desktop_config.json`'daki
   `starred-local-code-sessions` listesinden gelir. Liszt bu dosyalara yazmaz; her dosya yalnızca
   değiştiğinde yeniden okunur.
+- Aynı turda Claude Code'un konuşma kayıtları taranır: `~/.claude/projects/<klasör>/<sessionId>.jsonl`
+  (ya da `CLAUDE_CONFIG_DIR` altındaki karşılığı). Oturumu kim başlatmış olursa olsun kaydı buradadır,
+  bu yüzden başka hiçbir yerde listelenmeyen oturumlar buradan gelir. Kayıtlar onlarca MB olabildiği
+  için her birinin yalnızca ilk ve son 64 KB'ı, dosya değiştiğinde okunur: başlık (`/rename` adı, yoksa
+  Claude'un verdiği başlık, yoksa ilk prompt) ve klasör buradan çıkar. Oturum, kaydının durduğu klasöre
+  karşılık gelen klasörde `claude --resume` ile açılır. Claude Code eski kayıtları kendisi temizler
+  (`cleanupPeriodDays`, varsayılan 30 gün); temizlenen oturum listeden de düşer.
 - Claude'u doğrudan çalıştıran bir panelde `/background` yazılırsa Claude Code oturumu arka plan
   sunucusuna (`--bg-pty-host`) yeni bir kimlikle taşır ve panelin süreci `backgrounded · <id>` yazıp
   çıkar. Liszt bu satırı yakalayıp paneli o oturuma bağlar; **Resume** artık `claude attach <id>` ile

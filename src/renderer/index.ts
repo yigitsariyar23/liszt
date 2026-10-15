@@ -25,6 +25,7 @@ import type {
   SidebarView,
   TaskState,
   TaskStatus,
+  TranscriptSession,
 } from '../shared/types';
 import { h, iconEl } from './dom';
 import { ICONS, KIND_GLYPH } from './icons';
@@ -167,6 +168,7 @@ const sessionFilter = dropdown<SessionFilter>(
     ['active', 'Active'],
     ['liszt', 'In Liszt'],
     ['running', 'Running'],
+    ['unread', 'Unread'],
     ['pinned', 'Pinned'],
     ['archived', 'Archived'],
     ['all', 'All'],
@@ -867,6 +869,7 @@ function closePane(v: PaneView, { ask = true, stop = true } = {}): boolean {
   const visible = panesIn(project.layout);
   api.kill(v.pane.id);
   if (v.pane.kind === 'claude' && stop) api.stopBackground(v.pane.sessionId, v.pane.bgId);
+  keepUnread(v.pane);
   v.term.dispose();
   v.el.remove();
   views.delete(v.pane.id);
@@ -1585,6 +1588,7 @@ function closeProject(project: ProjectState, { ask = true } = {}) {
     if (!v) continue;
     api.kill(pane.id);
     if (pane.kind === 'claude') api.stopBackground(pane.sessionId, pane.bgId);
+    keepUnread(pane);
     v.term.dispose();
     v.el.remove();
     views.delete(pane.id);
@@ -1870,24 +1874,35 @@ function setAutopilot(on: boolean) {
 
 // --- Sessions panel ----------------------------------------------------------------------------
 // Every Claude Code session on the machine in one list: the panes in Liszt, the ones running
-// elsewhere (other terminals, the desktop app, background sessions) and the ones nothing runs,
-// which are finished background sessions and every session the Claude desktop app keeps, archived
-// and pinned ones included. A row shows its pane, or opens the session in a new pane of its
+// elsewhere (other terminals, the desktop app, background sessions) and the ones nothing runs:
+// finished background sessions, every session the Claude desktop app keeps, archived and pinned
+// ones included, and every other session Claude Code still has a transcript of, such as one that
+// ran in a terminal and ended. A row shows its pane, or opens the session in a new pane of its
 // folder's project: background sessions with `claude attach`, the rest with `claude --resume`.
-// A row's menu closes, archives or deletes its session. Archiving is Liszt's own: it never writes
-// to the Claude app's files, and it keeps the title and folder of a session listed nowhere else.
+// A row's menu marks its session unread, or closes, archives or deletes it. Marks are Liszt's
+// own: it never writes to the Claude app's files, and it keeps the title and folder of a session
+// archived from it.
 
 const STATUS_ORDER: Record<Status, number> = { attention: 0, running: 1, waiting: 2, starting: 3, idle: 4, exited: 5 };
 /** Replies waiting to be read sort right after the working sessions. */
 const UNREAD_RANK = 2.5;
 /** Sessions nothing runs sort after every running one. */
 const NOT_RUNNING = 6;
+/** What ran a session, by the entrypoint its transcript records. */
+const SOURCES: Record<string, string> = {
+  cli: 'Terminal',
+  'claude-desktop': 'Claude app',
+  'sdk-cli': 'Agent SDK',
+  'sdk-ts': 'Agent SDK',
+  'sdk-py': 'Agent SDK',
+};
 const sessionChips = new Map<string, HTMLElement>();
 /** Sessions being closed or deleted, with what the row says meanwhile. */
 const pendingSessions = new Map<string, string>();
 
 let agents: AgentSession[] = [];
 let appSessions: AppSession[] = [];
+let transcriptSessions: TranscriptSession[] = [];
 
 type SessionGroup = 'liszt' | 'elsewhere' | 'stopped';
 
@@ -1914,6 +1929,8 @@ interface SessionRow {
   time: number;
   pinned: boolean;
   archived: boolean;
+  /** Marked unread; shown so once nothing is working in it. */
+  unread: boolean;
   /** A process runs it, in Liszt or elsewhere. */
   live: boolean;
   dot: string;
@@ -1925,9 +1942,11 @@ interface SessionRow {
 }
 
 const FILTERS: Record<SessionFilter, (r: SessionRow) => boolean> = {
-  active: (r) => !r.archived || r.group !== 'stopped',
+  // One whose folder or conversation is gone can only be seen, so it waits under All.
+  active: (r) => (!r.archived || r.group !== 'stopped') && Boolean(r.open),
   liszt: (r) => r.group === 'liszt',
   running: (r) => r.live,
+  unread: (r) => r.unread,
   pinned: (r) => r.pinned,
   archived: (r) => r.archived,
   all: () => true,
@@ -1951,6 +1970,22 @@ const fold = (text: string) => text.toLowerCase().normalize('NFD').replace(/[̀-
 const isArchived = (sessionId: string, inApp = false) => state.sessionMarks[sessionId]?.archived ?? inApp;
 /** Deleted from Liszt and run by nothing, so its row stays hidden. */
 const isDeleted = (sessionId: string) => Boolean(state.sessionMarks[sessionId]?.deleted);
+/** Marked unread while no Liszt pane has it; a pane keeps its own. */
+const isMarkedUnread = (sessionId: string) => Boolean(state.sessionMarks[sessionId]?.unread);
+
+function markUnread(sessionId: string, unread: boolean) {
+  const mark = state.sessionMarks[sessionId];
+  if (Boolean(mark?.unread) === unread) return;
+  if (unread) state.sessionMarks[sessionId] = { ...mark, unread, at: mark?.at ?? Date.now() };
+  // A mark that said nothing else goes.
+  else if (mark.archived === undefined && !mark.deleted && !mark.cwd) delete state.sessionMarks[sessionId];
+  else mark.unread = undefined;
+}
+
+/** A pane that goes away leaves its session as unread as it was, for its row under Not running. */
+function keepUnread(pane: PaneState) {
+  if (pane.kind === 'claude' && pane.started) markUnread(pane.sessionId, Boolean(pane.unread));
+}
 
 function sessionRows(): SessionRow[] {
   const app = new Map(appSessions.map((s) => [s.sessionId, s]));
@@ -1977,6 +2012,7 @@ function sessionRows(): SessionRow[] {
       time: v.since,
       pinned: Boolean(s?.pinned) || pinnedAgent,
       archived: isArchived(v.pane.sessionId, s?.archived),
+      unread: Boolean(v.pane.unread),
       live: v.status !== 'exited',
       dot: dotClass(v),
       chip: [chipClass(v), chipText(v)],
@@ -2008,6 +2044,7 @@ function sessionRows(): SessionRow[] {
       time: Math.max(a.startedAt, s?.lastActivityAt ?? 0),
       pinned: Boolean(a.pinned || s?.pinned),
       archived: isArchived(a.sessionId, s?.archived),
+      unread: isMarkedUnread(a.sessionId),
       live: !a.ended,
       dot: busy ? 'running' : '',
       // Ended background sessions are done, stopped or failed; they stay openable, so they stay listed.
@@ -2036,6 +2073,7 @@ function sessionRows(): SessionRow[] {
       time: s.lastActivityAt,
       pinned: s.pinned,
       archived,
+      unread: isMarkedUnread(s.sessionId),
       live: false,
       dot: '',
       chip: ['chip', archived ? 'Archived' : ''],
@@ -2043,7 +2081,37 @@ function sessionRows(): SessionRow[] {
       open: gone ? undefined : () => openSession(s.cwd, s.sessionId, s.title),
     });
   }
-  // Sessions archived from Liszt that nothing else lists any more: closed panes and interactive sessions.
+  // Every other session Claude Code still has a transcript of: ones that ran in a terminal and
+  // ended, ones the Claude app no longer lists, Agent SDK runs and Liszt panes since closed.
+  for (const t of transcriptSessions) {
+    if (listed.has(t.sessionId) || isDeleted(t.sessionId)) continue;
+    listed.add(t.sessionId);
+    const folder = folderName(t.cwd);
+    // The title it had in Liszt when it was archived from there.
+    const title = state.sessionMarks[t.sessionId]?.title || t.title;
+    const source = SOURCES[t.entrypoint ?? ''] ?? 'Claude Code';
+    const archived = isArchived(t.sessionId);
+    rows.push({
+      group: 'stopped',
+      sessionId: t.sessionId,
+      cwd: t.cwd,
+      title,
+      project: projectFor(t.cwd)?.name ?? folder,
+      where: `${folder} · active ${duration(Date.now() - t.lastActivityAt)} ago`,
+      detail: t.gone ? `${source} · its folder no longer exists` : source,
+      rank: NOT_RUNNING,
+      time: t.lastActivityAt,
+      pinned: false,
+      archived,
+      unread: isMarkedUnread(t.sessionId),
+      live: false,
+      dot: '',
+      chip: ['chip', archived ? 'Archived' : ''],
+      tooltip: t.gone ? `${t.cwd}\nCannot be opened: its folder no longer exists` : `${t.cwd}\nClick to open in Liszt (claude --resume)`,
+      open: t.gone ? undefined : () => openSession(t.cwd, t.sessionId, title),
+    });
+  }
+  // Sessions archived from Liszt that nothing lists any more, not even a transcript.
   for (const [sessionId, m] of Object.entries(state.sessionMarks)) {
     if (!m.cwd || m.deleted || listed.has(sessionId)) continue;
     const cwd = m.cwd;
@@ -2061,12 +2129,20 @@ function sessionRows(): SessionRow[] {
       time: m.at,
       pinned: false,
       archived: Boolean(m.archived),
+      unread: Boolean(m.unread),
       live: false,
       dot: '',
       chip: ['chip', m.archived ? 'Archived' : ''],
       tooltip: `${cwd}\nClick to open in Liszt (claude --resume)`,
       open: () => openSession(cwd, sessionId, title),
     });
+  }
+  // Outside Liszt an unread session shows it the way a pane does: once nothing is working in it.
+  for (const r of rows) {
+    if (r.view || !r.unread || r.dot === 'running') continue;
+    r.dot = 'unread';
+    r.rank = UNREAD_RANK;
+    r.chip = ['chip unread', 'Unread'];
   }
   return rows;
 }
@@ -2075,13 +2151,14 @@ function renderSessionRow(r: SessionRow): HTMLElement {
   const row = h('div', 'srow');
   if (r.view) row.classList.add(r.view.status);
   else row.classList.add('outside', ...(r.dot === 'running' ? ['running'] : []), ...(r.group === 'stopped' ? ['ended'] : []));
+  if (r.dot === 'unread') row.classList.add('unread');
   if (!r.open) row.classList.add('gone');
   const pending = pendingSessions.get(r.sessionId);
   if (pending) row.classList.add('pending');
   const chip = h('span', r.chip[0], r.chip[1]);
   if (r.view) sessionChips.set(r.view.pane.id, chip);
   const more = iconEl(ICONS.more, 'srow-more');
-  more.title = 'Close, archive or delete';
+  more.title = 'Mark unread, close, archive or delete';
   const top = h('div', 'srow-top');
   top.append(h('span', `dot ${r.dot}`));
   if (r.pinned) top.append(iconEl(ICONS.pin, 'srow-pin'));
@@ -2105,6 +2182,7 @@ async function sessionRowMenu(r: SessionRow, at: MenuAnchor) {
   const choice = await showMenu(
     [
       { label: r.view ? 'Show Session' : 'Open in Liszt', id: 'open', enabled: Boolean(r.open) },
+      { label: r.unread ? 'Mark as Read' : 'Mark as Unread', id: 'unread' },
       'separator',
       { label: 'Close Session', id: 'close', enabled: canClose },
       r.archived ? { label: 'Unarchive', id: 'unarchive' } : { label: canClose ? 'Close and Archive' : 'Archive', id: 'archive' },
@@ -2118,6 +2196,11 @@ async function sessionRowMenu(r: SessionRow, at: MenuAnchor) {
   switch (choice) {
     case 'open':
       return r.open?.();
+    case 'unread':
+      if (r.view) return setUnread(r.view, !r.unread);
+      markUnread(r.sessionId, !r.unread);
+      renderSessions();
+      return save();
     case 'close':
       return void closeSession(r);
     case 'archive':
@@ -2162,7 +2245,7 @@ async function archiveSession(r: SessionRow, archived: boolean) {
   if (archived && (r.view || r.live) && !(await closeSession(r))) return;
   const mark = state.sessionMarks[r.sessionId];
   state.sessionMarks[r.sessionId] = archived
-    ? { archived, title: r.title, cwd: r.cwd, at: Date.now() }
+    ? { archived, unread: mark?.unread, title: r.title, cwd: r.cwd, at: Date.now() }
     : { ...mark, archived, at: mark?.at ?? Date.now() };
   renderSessions();
   save();
@@ -2223,6 +2306,8 @@ function renderSessions() {
 
 /** Opens a session in a new pane of its folder's project, adding the folder as a project if needed. */
 function openSession(cwd: string, sessionId: string, title: string, bgId?: string) {
+  // Opening it reads it; from here on its pane keeps whether it is unread.
+  markUnread(sessionId, false);
   const project = projectFor(cwd) ?? createProject(cwd.replace(/(.)\/+$/, '$1'));
   if (state.activeProjectId !== project.id) activateProject(project.id);
   const v = addPane('claude', project, { sessionId, bgId });
@@ -2235,6 +2320,11 @@ function openSession(cwd: string, sessionId: string, title: string, bgId?: strin
 
 function onAppSessions(list: AppSession[]) {
   appSessions = list;
+  renderSessions();
+}
+
+function onTranscriptSessions(list: TranscriptSession[]) {
+  transcriptSessions = list;
   renderSessions();
 }
 
@@ -2532,6 +2622,7 @@ api.onBackground((id, bgId) => {
 api.onHook(onHook);
 api.onAgents(onAgents);
 api.onAppSessions(onAppSessions);
+api.onTranscriptSessions(onTranscriptSessions);
 api.onMenu(onMenu);
 api.onFocusPane((id) => {
   const v = views.get(id);

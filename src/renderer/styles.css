@@ -1425,7 +1425,7 @@ button.task-section-head:hover {
   height: 11px;
 }
 
-/* Opens the row's close, archive and delete menu, which a right-click opens too. */
+/* Opens the row's menu (mark unread, close, archive, delete), which a right-click opens too. */
 .srow-more {
   display: grid;
   place-items: center;
@@ -1470,6 +1470,13 @@ button.task-section-head:hover {
 
 .srow.outside.ended:not(:hover) .srow-title {
   color: var(--faint);
+}
+
+/* A reply nobody has read yet, or a session marked unread. */
+.srow.unread .srow-title,
+.srow.outside.unread:not(:hover) .srow-title {
+  color: var(--text);
+  font-weight: 600;
 }
 
 /* Its folder or conversation is gone, so it cannot be opened. */

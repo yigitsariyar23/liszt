@@ -19,6 +19,7 @@ import type {
   ProjectKind,
   SpawnOptions,
   SpawnResult,
+  TranscriptSession,
   WorktreeResult,
 } from '../shared/types';
 
@@ -534,14 +535,148 @@ async function listAppSessions(): Promise<AppSession[]> {
   return list;
 }
 
+// --- Claude Code transcripts -------------------------------------------------------------------
+// Claude Code keeps a transcript of every session it runs in projects/<folder>/<id>.jsonl until it
+// cleans old ones up, whatever started the session: a terminal, the Claude app, the Agent SDK or a
+// Liszt pane. It is the only trace of a session nothing else lists, such as one that ran in a
+// terminal and ended. Transcripts run to tens of MB, so only their two ends are read, once per
+// change: the head has the first prompt, and Claude Code keeps appending the session's title and
+// last prompt so that its own session list finds them in the tail.
+
+/** How much of each end of a transcript is read. */
+const TRANSCRIPT_END = 64 * 1024;
+
+const transcriptFiles = new Map<string, { mtimeMs: number; size: number; session: TranscriptSession | null }>();
+
+/** The folder under projects/ that Claude Code files a session started in `cwd` under. */
+const projectFolder = (cwd: string) => cwd.replace(/[^a-zA-Z0-9]/g, '-');
+
+/** The records of a chunk of a transcript; the lines it cuts off at either end do not parse and are skipped. */
+function records(text: string): Record<string, unknown>[] {
+  const list: Record<string, unknown>[] = [];
+  for (const line of text.split('\n')) {
+    if (!line.startsWith('{')) continue;
+    try {
+      list.push(JSON.parse(line) as Record<string, unknown>);
+    } catch {
+      // Cut off.
+    }
+  }
+  return list;
+}
+
+/** A prompt on one line: `/command args` for a slash command, nothing for what Claude Code adds itself. */
+function promptText(message: unknown): string {
+  const content = (message as { content?: unknown } | undefined)?.content;
+  const text =
+    typeof content === 'string'
+      ? content
+      : Array.isArray(content)
+        ? content.map((b: { type?: unknown; text?: unknown }) => (b?.type === 'text' && typeof b.text === 'string' ? b.text : '')).join(' ')
+        : '';
+  const command = /<command-name>([^<]*)<\/command-name>/.exec(text);
+  const line = command ? `${command[1]} ${/<command-args>([\s\S]*?)<\/command-args>/.exec(text)?.[1] ?? ''}` : text.trimStart().startsWith('<') ? '' : text;
+  return line.replace(/\s+/g, ' ').trim().slice(0, 200);
+}
+
+async function readTranscript(file: string): Promise<TranscriptSession | null> {
+  const stat = await fs.promises.stat(file).catch(() => null);
+  if (!stat) return null;
+  const cached = transcriptFiles.get(file);
+  if (cached?.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.session;
+  let head = '';
+  let tail = '';
+  try {
+    const fh = await fs.promises.open(file, 'r');
+    try {
+      const read = async (at: number, length: number) => {
+        const buf = Buffer.alloc(length);
+        const { bytesRead } = await fh.read(buf, 0, length, at);
+        return buf.toString('utf8', 0, bytesRead);
+      };
+      head = await read(0, Math.min(stat.size, TRANSCRIPT_END));
+      if (stat.size > TRANSCRIPT_END) {
+        const from = Math.max(TRANSCRIPT_END, stat.size - TRANSCRIPT_END);
+        tail = await read(from, stat.size - from);
+      }
+    } finally {
+      await fh.close();
+    }
+  } catch {
+    return null;
+  }
+  const first = records(head);
+  const all = [...first, ...records(tail)];
+  const str = (r: Record<string, unknown>, k: string) => (typeof r[k] === 'string' ? (r[k] as string) : '');
+  // A session that went into a worktree goes on recording the worktree as its folder.
+  const cwds: string[] = [];
+  let entrypoint = '';
+  let customTitle = '';
+  let aiTitle = '';
+  let agentName = '';
+  let lastPrompt = '';
+  for (const r of all) {
+    if (str(r, 'cwd')) cwds.push(str(r, 'cwd'));
+    const original = (r.worktreeSession as { originalCwd?: unknown } | undefined)?.originalCwd;
+    if (typeof original === 'string') cwds.push(original);
+    entrypoint ||= str(r, 'entrypoint');
+    // Appended again as they change, so the last one counts.
+    customTitle = str(r, 'customTitle') || customTitle;
+    aiTitle = str(r, 'aiTitle') || aiTitle;
+    agentName = str(r, 'agentName') || agentName;
+    lastPrompt = (r.type === 'last-prompt' && promptText({ content: r.lastPrompt })) || lastPrompt;
+  }
+  let firstPrompt = '';
+  for (const r of first) {
+    if (r.type === 'user' && !r.isMeta && !r.isSidechain) firstPrompt = promptText(r.message);
+    if (firstPrompt) break;
+  }
+  const folder = path.basename(path.dirname(file));
+  const cwd = cwds.find((dir) => projectFolder(dir) === folder) ?? cwds[0];
+  const title = customTitle || aiTitle || agentName || firstPrompt || lastPrompt;
+  // Without a folder or a single prompt there is nothing to resume; a subagent's transcript is not a session.
+  const session: TranscriptSession | null =
+    cwd && title && first.find((r) => 'isSidechain' in r)?.isSidechain !== true
+      ? {
+          sessionId: path.basename(file, '.jsonl'),
+          title,
+          cwd,
+          entrypoint: entrypoint || undefined,
+          lastActivityAt: stat.mtimeMs,
+        }
+      : null;
+  transcriptFiles.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, session });
+  return session;
+}
+
+async function listTranscriptSessions(): Promise<TranscriptSession[]> {
+  const root = path.join(await claudeDir(), 'projects');
+  const files = new Set<string>();
+  for (const dir of await readDir(root)) {
+    for (const name of await readDir(path.join(root, dir))) {
+      if (name.endsWith('.jsonl') && SESSION_ID.test(name.slice(0, -'.jsonl'.length))) files.add(path.join(root, dir, name));
+    }
+  }
+  for (const file of transcriptFiles.keys()) if (!files.has(file)) transcriptFiles.delete(file);
+  const list: TranscriptSession[] = [];
+  for (const file of files) {
+    const s = await readTranscript(file);
+    if (s) list.push(fs.existsSync(s.cwd) ? s : { ...s, gone: true });
+  }
+  return list;
+}
+
 let pollingAgents = false;
 async function pollAgents() {
   if (pollingAgents || !win || win.isDestroyed()) return;
   pollingAgents = true;
   try {
-    const [list, appList] = await Promise.all([listAgents(), listAppSessions().catch(() => null)]);
-    if (list) send('agents', list);
-    if (appList) send('app-sessions', appList);
+    // Each list goes out as soon as it is ready: the first read of the transcripts takes a moment.
+    await Promise.all([
+      listAgents().then((list) => list && send('agents', list)),
+      listAppSessions().then((list) => send('app-sessions', list), () => {}),
+      listTranscriptSessions().then((list) => send('transcript-sessions', list), () => {}),
+    ]);
   } finally {
     pollingAgents = false;
   }
