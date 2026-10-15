@@ -1,3 +1,47 @@
+```
+
+                                     ..:!!!+sohoo@@CCCv.
+                              -sohC@@OWW@OOWOOO@@@@@OO@O@h+.
+                           ,soohCChhChCChCCChhhhoCCCCCC@@COOOo:
+                         +soooh@C!!!vssooohhCCCC@@@@@O@@@CChCWOhv
+                       sssoooohhv,+xxxssssoohhhhhCCC@CCC@OOO@@OO@h:.
+                     ossooosss+!!vxoosxvv+vvxxvxshohChCCC@@@OO@C@O@-,
+                   !ossoxxxvs+:+++vvxsssx+xxvsohhhhoh@@@@@@@@@OO@@OWx.
+                  hosxxxssxs+!++!!!+vxshChhh@@OoC@O@oCC@@@OOOOOOOOC@OC+:
+                 hov++!+vCs++vv+++!:!+shhossooo::@@OC!Co+vooooh@@sO@@OCx,
+                ox+!!-!xhCv++v++::!:!xohoosxs+!+-!,+Cv+-  ..--,!CoxOOW@++
+              .sxv++!!sx@v++v!----::+!!--::-,.,,. .+hCv.   ,!+:-+OsC@@Ox!v
+              sxvxx!+x!+@v!:!-,-:-:,,,,-...-ss-:- .-oQQ!.,-:++xvoOW@@COs-!!
+             :ss+sx,vv!hxv.+!:!-!:!:--.,.,-:xovxv--,-hQQhx++vs@@OQWOCOhx!!!
+             sss!hs:vsssv:,+!::-!::+++!:++vvxvvsx+!!+xQQWWOChC@@OOO@hOxv+!+
+            -sxx+ovx+sv++.,-::!.:!:!vooosooohC@Cv!!:+x@QQWO@QWO@hohChOC+!!
+            oxv+xx+vxs!+,..,:,:::::::!+vxsohCCC+,vs!.:vhCO@x-h@Chshho@@x:!-
+           ox++xo!+os!!!,,..,,,+-,-:::!!++vssx!..,.....,:+vv ,+CCoohsh@Oo:!!,
+          oxvvss:!oxx::!..,..,,,,.,::::::!!!!!--,.,.::.!sCOhs:.-hohsxoh@Whv+!
+        .sxxxx!:+xxvv:-,,...,.,,,-,,-::::!!,!+!:---,x! xxxv++x!+xxhxxsoh@W@o+!
+        xvvx+-:svvvs!!:,-. .:,,:--,,-::-!+-:::,-,,--+x+xh@Co++xhhso+sxshhCOWh+
+       xvxx!,vhv+voxv!:-.......-:-.,----+!!v!-:!!:!vssohC@OOWOvshCx:+xhsCCCWWC:
+      :sxv+:vhs++osxv+:--,.....-,-,.,,--!:!++!!!!:::!!+xohC@@O@xoC++xvoohChC@Oo
+      osxx!vhosvsossxv!--!:...:-!,.,,,--:-:!!::!+vxxoC@@QQQWOO@xshxxooxCoCCCO@C
+      hox+!CsoooossCos+!,!+!. :v:+!,...,--,-:--!!+++vxv+xhChh@os@CxxCChhsOO@@h!
+     oxxv+!+xohosxvooh+-!:+,.. :o+xos+-.......,,,--,:!::-!:+xhhohhohCCC@osoox:
+     .x++!vvv++++!vv!-!-,-..... .+xvohCox+!:-....,,,..,+x.Chvohoxxohoshos-
+        .x@x- .......  .. ......  .:!vsohCChhox+:...,+o@-Cs +!:,,:+vxxx++:
+       .+-.  ......................  .-::+ohhohhCs,:xOW@Ws  .-!:.. .-+xsxxxx.
+    -+,  .,,..........................  . .!xohChOQQQQQQ!-.   ,vs+:....:+vvxxxv.
+ ++-..,--,,,....,....................... ..  .-voChox!, -x+.    :vsx+:...-!!+xsosvv
+!--::::----,,,-,,....... ..............,. ...   .... .. ++vv:.   .+xxxxv!,,,-!+shx+x-
+!!!!:::------,,,,-,,,... .,.............,, ........,-+.,v!+vv+:,. .!xxvxsx+!+s+-vh!+x!
+!!:!::-:-----,.--,--,-..  .......,-,,,-,.,:..........,.:x+!+vvv++:. .+xxvxvvxxox:+v!+v+
+---!!:--::-:--,,,,-,---....,.---:-::::-,:,,:-..,.-,,,.. ,++!+++vvvv!  ,vossssx+vhv+v!:x.
+...-!!-.,----:-,.-,.,...,-,..---!!:-:!:--!:,-!,.,,-,-,-, -v::vxxv+vxx-  !soosoov,ohs+:x+
+....,:!:....,-----,..,..,-,,.,-::::::!:-:-:!::+,.-,,,-:-. -x+!+vxx++vs:  ,+oossh! !Cvxvv+.
+.. ...-:!.   .,:::--.,-  ,,,..,::!!!!:!!+!--!!+x,.,------- .vx++!+sxvvs!  .:sooohsvhv+svxx
+........,!,  ...,::-. ,-.  ,-,,-:!:!!!!!!+!!!:!+o,.--------  +++v!-+svvx+.  -+sosoooo!+x++
+```
+
+<sub>Franz Liszt, photographed by Nadar in 1886 · Listen: [Hungarian Rhapsody No. 2](https://www.youtube.com/watch?v=E9S2CfDwNAg), played by György Cziffra</sub>
+
 # Liszt
 
 A personal terminal that runs Claude Code sessions in project tabs and split panes.
