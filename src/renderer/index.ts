@@ -69,6 +69,8 @@ interface PaneView {
   attached: boolean;
   /** A hook arrived since the last spawn, so hooks drive the status. */
   hooked: boolean;
+  /** When Claude was asked to name the session; the next terminal title is the name. */
+  renaming?: number;
 }
 
 interface PaneOptions {
@@ -330,6 +332,12 @@ function createView(project: ProjectState, pane: PaneState): PaneView {
     const clean = raw.replace(/^[^\p{L}\p{N}]+/u, '').trim();
     if (!clean || clean === pane.title || /^claude( code)?$/i.test(clean)) return;
     pane.title = clean;
+    // The name Claude was asked for replaces the one typed in Liszt.
+    if (v.renaming && Date.now() - v.renaming < RENAME_WAIT) {
+      v.renaming = undefined;
+      pane.customTitle = undefined;
+      renderSessions();
+    }
     renderTitle(v);
     save();
   });
@@ -608,12 +616,70 @@ function renameTab(v: PaneView) {
   if (title) editTitle(v, title);
 }
 
+/** Claude Code takes typed commands while its turn is over, background tasks or not. */
+const atPrompt = (v: PaneView) => v.pane.kind === 'claude' && v.pane.started && v.spawned && (v.status === 'idle' || v.status === 'waiting');
+
+/** A rule of Claude Code's prompt box; the top one carries the session's name once it has one. */
+const RULE = /^\s*─{4,}(?:.*─)?\s*$/;
+
+/**
+ * Claude Code's prompt box as it is on screen: a `❯` line and the lines of the draft under it,
+ * between two rules. The draft leaves out the dim placeholder and the cursor; `stashed` is the note
+ * above the box saying Ctrl+S put a draft aside. Null when the box is not showing, as when a menu
+ * or a question has the keyboard.
+ */
+function promptBox(term: Terminal): { draft: string; stashed: boolean } | null {
+  const buf = term.buffer.active;
+  const bottom = buf.baseY + term.rows - 1;
+  const text = (y: number) => buf.getLine(y)?.translateToString(true) ?? '';
+  for (let y = bottom; y > bottom - term.rows && y > 0; y--) {
+    if (!text(y).trimStart().startsWith('❯') || !RULE.test(text(y - 1))) continue;
+    let draft = '';
+    for (let row = y; row <= bottom && !RULE.test(text(row)); row++) {
+      const line = buf.getLine(row)!;
+      for (let x = 0; x < line.length; x++) {
+        const cell = line.getCell(x)!;
+        if (!cell.isDim() && !cell.isInverse()) draft += cell.getChars() || ' ';
+      }
+      draft += '\n';
+    }
+    return { draft: draft.trim().replace(/^❯/, '').trim(), stashed: text(y - 2).includes('› stashed') };
+  }
+  return null;
+}
+
+/** How long the name asked of Claude may take to arrive; the model makes it up. */
+const RENAME_WAIT = 60_000;
+
+/**
+ * Has Claude Code name the session the way `/rename` with no name does: it asks the model for a
+ * short name, keeps it as the session's name and sets it as the terminal title, which the pane
+ * takes up in place of a name typed in Liszt. The model can come back without one, and then
+ * nothing changes. The command is typed into the prompt box, so a draft there is first put aside
+ * with Ctrl+S, and Claude Code brings it back once the command has run.
+ */
+async function renameWithClaude(v: PaneView) {
+  const box = promptBox(v.term);
+  if (!box) return alert(`"${displayTitle(v)}" is not at its prompt. Close what is open in it, then ask again.`);
+  // Ctrl+S keeps one draft aside, so it would drop the one already there.
+  if (box.draft && box.stashed) return alert(`"${displayTitle(v)}" has a draft in its prompt and another stashed with Ctrl+S. Send or clear the draft, then ask again.`);
+  v.renaming = Date.now();
+  // Sent all at once, the keys would read as a paste and the Enter as a new line.
+  const keys = [...(box.draft ? ['\x13'] : []), '/rename', '\r'];
+  for (const [i, k] of keys.entries()) {
+    if (i) await new Promise((r) => setTimeout(r, 250));
+    if (views.get(v.pane.id) !== v) return;
+    api.write(v.pane.id, k);
+  }
+}
+
 async function sessionMenu(v: PaneView, from: 'tab' | 'head', at: MenuAnchor) {
   const project = v.project;
   const visible = panesIn(project.layout);
   const anchor = splitAnchor(project);
   const canSplit = Boolean(anchor && anchor !== v.pane.id);
   const entries: MenuEntry[] = [{ label: 'Rename…', id: 'rename' }];
+  if (v.pane.kind === 'claude') entries.push({ label: 'Rename with Claude', id: 'rename-claude', enabled: atPrompt(v) });
   if (v.pane.customTitle) entries.push({ label: 'Use Automatic Name', id: 'reset-name' });
   entries.push(
     { label: v.pane.unread ? 'Mark as Read' : 'Mark as Unread', id: 'unread' },
@@ -632,6 +698,8 @@ async function sessionMenu(v: PaneView, from: 'tab' | 'head', at: MenuAnchor) {
   switch (choice) {
     case 'rename':
       return from === 'tab' ? renameTab(v) : editTitle(v);
+    case 'rename-claude':
+      return void renameWithClaude(v);
     case 'unread':
       return setUnread(v, !v.pane.unread);
     case 'reset-name':

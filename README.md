@@ -80,6 +80,14 @@ ditto release/mac-arm64/Liszt.app /Applications/Liszt.app
 - Bir oturum sekmesine (ya da bölmenin başlığına) sağ tıklayınca oturum menüsü açılır:
   - **Rename…** adı sekmenin üzerinde düzenletir; Enter kaydeder, Esc vazgeçer. Adı silip
     kaydetmek ya da **Use Automatic Name** Claude'un verdiği başlığa döner.
+  - **Rename with Claude** adı Claude Code'a koydurur: oturuma argümansız `/rename` yazar, model
+    konuşmaya bakıp kısa bir ad üretir (`fix-login-bug` gibi). Ad oturumun Claude Code'daki adı olur
+    (`/resume`, `claude agents`) ve terminal başlığı olarak sekmeye gelir; Liszt'te elle verilmiş adın
+    yerine geçer. Model ad üretemezse hiçbir şey değişmez. Yalnızca Claude sırasını bitirmiş, prompt
+    beklerken açıktır. Prompt kutusunda yarım bir taslak varsa önce Ctrl+S ile kenara alınır, komut
+    bitince Claude Code onu geri koyar. Ctrl+S ile saklanmış başka bir taslak daha varsa onu ezmemek
+    için Liszt bir şey yazmaz ve uyarır. Kutu ekranda değilse (bir menü ya da soru açıksa) de bir şey
+    yazılmaz.
   - **Mark as Unread / Mark as Read** oturumu sonra dönmek üzere okunmamış işaretler ya da işareti
     kaldırır.
   - **Split Right / Split Down** oturumu odaktaki bölmenin yanına koyar; **Take Out of Split** onu
