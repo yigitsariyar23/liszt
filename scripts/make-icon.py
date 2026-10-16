@@ -1,6 +1,6 @@
 """Draws build/icon.png (1024x1024), the app icon electron-builder turns into Liszt.icns.
 
-The mark is the three-pane logo from the top bar, on a dark rounded square sized to Apple's macOS
+The mark is the L-shaped logo from the top bar, on a dark rounded square sized to Apple's macOS
 icon grid (an 824 px tile with a soft shadow on a 1024 canvas). Drawn at 4x and scaled down for
 clean edges. Run: python3 scripts/make-icon.py
 """
@@ -45,14 +45,14 @@ def main():
     canvas.paste(small, (0, 0), tile_mask)
     ImageDraw.Draw(canvas).rounded_rectangle(tile_box, RADIUS, outline=(255, 255, 255, 28), width=3 * S)
 
-    # Three-pane mark (16-unit grid from the top-bar SVG: one tall pane, two stacked panes).
+    # L mark (16-unit grid from the top-bar SVG: one tall pane and a square foot to its right).
     unit = 30 * S
     mark = 14 * unit
     ox = (SIZE - mark) // 2 - unit
     oy = (SIZE - mark) // 2 - unit
     mark_mask = Image.new('L', (SIZE, SIZE), 0)
     d = ImageDraw.Draw(mark_mask)
-    for x, y, w, h in [(1, 1, 6, 14), (9, 1, 6, 6), (9, 9, 6, 6)]:
+    for x, y, w, h in [(1, 1, 6, 14), (9, 9, 6, 6)]:
         d.rounded_rectangle((ox + x * unit, oy + y * unit, ox + (x + w) * unit, oy + (y + h) * unit), int(1.5 * unit), fill=255)
     orange = vertical_gradient((1, 256), (242, 145, 99), (214, 104, 62)).resize((SIZE, SIZE))
     canvas.paste(orange, (0, 0), mark_mask)
