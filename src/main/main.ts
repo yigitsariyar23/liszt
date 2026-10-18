@@ -110,6 +110,9 @@ function hookSettings(paneId: string, allow: string[] = []): string {
       SessionEnd: entry,
       PostToolUse: toolEntry,
     },
+    // Every pane is a background session, and Claude Code would otherwise keep it out of the
+    // project's own checkout until it moves into a worktree.
+    worktree: { bgIsolation: 'none' },
     ...(allow.length ? { permissions: { allow } } : {}),
   });
 }
