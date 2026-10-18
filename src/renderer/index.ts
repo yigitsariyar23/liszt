@@ -754,6 +754,7 @@ function setFocused(v: PaneView) {
   v.project.activePaneId = v.pane.id;
   v.el.classList.add('focused');
   paintSessionTabs();
+  renderSessions();
   save();
   // The Changes sidebar follows the focused session into its worktree.
   void refreshGit();
@@ -1630,6 +1631,7 @@ function activateProject(id: string | null) {
   }
   renderTabs();
   renderSessionBar();
+  renderSessions();
   renderTasks();
   void refreshGit();
   save();
@@ -2329,6 +2331,8 @@ function renderSessionRow(r: SessionRow): HTMLElement {
   else row.classList.add('outside', ...(r.dot === 'running' ? ['running'] : []), ...(r.group === 'stopped' ? ['ended'] : []));
   if (r.dot === 'unread') row.classList.add('unread');
   if (!r.open) row.classList.add('gone');
+  // The session open in front of you: the focused pane of the project on screen.
+  if (r.view && r.view.pane.id === focusedPaneId && r.view.project.id === state.activeProjectId) row.classList.add('current');
   const pending = pendingSessions.get(r.sessionId);
   if (pending) row.classList.add('pending');
   const chip = h('span', r.chip[0], r.chip[1]);

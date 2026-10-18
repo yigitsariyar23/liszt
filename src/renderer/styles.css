@@ -1401,6 +1401,16 @@ button.task-section-head:hover {
   background: color-mix(in srgb, var(--st-attention) 14%, transparent);
 }
 
+/* The session open in front of you. */
+.srow.current {
+  background: var(--panel-2);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.srow.current .srow-title {
+  font-weight: 600;
+}
+
 /* Picked with Cmd- or Shift-click, for acting on several at once. */
 .srow.selected,
 .srow.selected:hover,
