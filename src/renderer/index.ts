@@ -16,6 +16,7 @@ import type {
   GroupColor,
   HookEvent,
   LayoutNode,
+  NotifyKind,
   PaneKind,
   PaneState,
   ProjectGroup,
@@ -74,6 +75,8 @@ interface PaneView {
   unannounced?: string;
   /** When Claude was asked to name the session; the next terminal title is the name. */
   renaming?: number;
+  /** Folder Claude asked to move this New Project session to; it moves when the turn ends. */
+  moveTo?: string;
 }
 
 interface PaneOptions {
@@ -92,6 +95,8 @@ interface PaneOptions {
   /** Open it in a new tile on this side of the focused one. */
   split?: Side;
   focus?: boolean;
+  /** A New Project session, told how to move itself to its project's folder. */
+  newProject?: boolean;
 }
 
 const DEFAULT_FONT_SIZE = 13;
@@ -430,6 +435,7 @@ async function spawn(v: PaneView, resume: boolean, prompt?: string) {
     prompt,
     transcript: v.pane.transcript,
     attach: resume ? v.pane.bgId : undefined,
+    newProject: v.pane.newProject,
   });
   // Closed while claude started.
   if (views.get(v.pane.id) !== v) return;
@@ -691,20 +697,20 @@ async function sessionMenu(v: PaneView, from: 'tab' | 'head', at: MenuAnchor) {
   const visible = panesIn(project.layout);
   const anchor = splitAnchor(project);
   const canSplit = Boolean(anchor && anchor !== v.pane.id);
-  const entries: MenuEntry[] = [{ label: 'Rename…', id: 'rename' }];
-  if (v.pane.kind === 'claude') entries.push({ label: 'Rename with Claude', id: 'rename-claude', enabled: atPrompt(v) });
-  if (v.pane.customTitle) entries.push({ label: 'Use Automatic Name', id: 'reset-name' });
+  const entries: MenuEntry[] = [{ label: 'Rename…', id: 'rename', key: 'r' }];
+  if (v.pane.kind === 'claude') entries.push({ label: 'Rename with Claude', id: 'rename-claude', key: 'l', enabled: atPrompt(v) });
+  if (v.pane.customTitle) entries.push({ label: 'Use Automatic Name', id: 'reset-name', key: 'n' });
   entries.push(
-    { label: v.pane.unread ? 'Mark as Read' : 'Mark as Unread', id: 'unread' },
+    { label: v.pane.unread ? 'Mark as Read' : 'Mark as Unread', id: 'unread', key: 'u' },
     'separator',
-    { label: 'Split Right', id: 'split-right', enabled: canSplit },
-    { label: 'Split Down', id: 'split-down', enabled: canSplit },
-    { label: 'Take Out of Split', id: 'unsplit', enabled: visible.length > 1 && visible.includes(v.pane.id) },
+    { label: 'Split Right', id: 'split-right', key: 's', enabled: canSplit },
+    { label: 'Split Down', id: 'split-down', key: 'b', enabled: canSplit },
+    { label: 'Take Out of Split', id: 'unsplit', key: 't', enabled: visible.length > 1 && visible.includes(v.pane.id) },
     'separator',
-    { label: 'Reveal in Finder', id: 'reveal' },
+    { label: 'Reveal in Finder', id: 'reveal', key: 'f' },
   );
-  if (v.pane.kind === 'claude') entries.push({ label: 'Copy Session ID', id: 'copy-id', enabled: v.pane.started });
-  entries.push('separator', { label: 'Close Session', id: 'close' }, { label: 'Close Other Sessions', id: 'close-others', enabled: project.panes.length > 1 });
+  if (v.pane.kind === 'claude') entries.push({ label: 'Copy Session ID', id: 'copy-id', key: 'i', enabled: v.pane.started });
+  entries.push('separator', { label: 'Close Session', id: 'close', key: 'c' }, { label: 'Close Other Sessions', id: 'close-others', key: 'o', enabled: project.panes.length > 1 });
   const choice = await showMenu(entries, at);
   // The session may have been closed while the menu was open.
   if (views.get(v.pane.id) !== v) return;
@@ -914,6 +920,7 @@ function addPane(kind: PaneKind, project = activeProject(), opts: PaneOptions = 
     taskId: opts.taskId,
     branch: opts.branch,
     bgId: opts.bgId,
+    newProject: opts.newProject || undefined,
   };
   // New tabs open next to the focused one, like a browser; task sessions line up at the end.
   const at = opts.taskId ? -1 : project.panes.findIndex((p) => p.id === project.activePaneId);
@@ -1244,7 +1251,7 @@ function renderTabs() {
 function projectTab(p: ProjectState): HTMLElement {
   const tab = h('div', `tab${p.id === state.activeProjectId ? ' active' : ''}${p.folded ? ' folded' : ''}`);
   tab.draggable = true;
-  tab.title = `${p.name}\n${p.path}\nDrag to reorder or into a group, right-click for more`;
+  tab.title = `${p.name}\n${p.path}\nDouble-click to ${p.folded ? 'unfold' : 'fold'}, drag to reorder or into a group, right-click for more`;
   const close = iconEl(ICONS.close, 'tab-close');
   close.title = 'Close project (⇧⌘W)';
   const name = h('span', 'tab-name', p.name);
@@ -1254,6 +1261,9 @@ function projectTab(p: ProjectState): HTMLElement {
   tab.addEventListener('click', (e) => {
     if (close.contains(e.target as Node)) closeProject(p);
     else if (!name.isContentEditable) activateProject(p.id);
+  });
+  tab.addEventListener('dblclick', (e) => {
+    if (!close.contains(e.target as Node) && !name.isContentEditable) foldProjects([p], !p.folded);
   });
   tab.addEventListener('auxclick', (e) => e.button === 1 && closeProject(p));
   tab.addEventListener('contextmenu', (e) => {
@@ -1457,17 +1467,18 @@ function closeGroup(group: ProjectGroup) {
 async function groupMenu(group: ProjectGroup, at: MenuAnchor) {
   const choice = await showMenu(
     [
-      { label: 'Rename…', id: 'rename' },
+      { label: 'Rename…', id: 'rename', key: 'r' },
       {
         label: 'Color',
+        key: 'k',
         submenu: GROUP_COLORS.map(([color, label, css]) => ({ label, id: `color:${color}`, swatch: css, checked: color === group.color })),
       },
-      { label: group.collapsed ? 'Expand' : 'Collapse', id: 'collapse' },
+      { label: group.collapsed ? 'Expand' : 'Collapse', id: 'collapse', key: 'e' },
       'separator',
-      { label: 'Add Project to Group…', id: 'add' },
+      { label: 'Add Project to Group…', id: 'add', key: 'p' },
       'separator',
-      { label: 'Ungroup', id: 'ungroup' },
-      { label: 'Close Group', id: 'close' },
+      { label: 'Ungroup', id: 'ungroup', key: 'u' },
+      { label: 'Close Group', id: 'close', key: 'c' },
     ],
     at,
   );
@@ -1531,34 +1542,35 @@ async function detectIcon(project: ProjectState) {
 async function projectMenu(project: ProjectState, at: MenuAnchor) {
   const others = state.projects.filter((p) => p !== project);
   const otherGroups = state.groups.filter((g) => g.id !== project.groupId);
-  const entries: MenuEntry[] = [{ label: 'Rename…', id: 'rename' }];
-  if (project.name !== folderName(project.path)) entries.push({ label: 'Use Folder Name', id: 'reset-name' });
+  const entries: MenuEntry[] = [{ label: 'Rename…', id: 'rename', key: 'r' }];
+  if (project.name !== folderName(project.path)) entries.push({ label: 'Use Folder Name', id: 'reset-name', key: 'n' });
   entries.push(
     'separator',
     otherGroups.length
       ? {
           label: project.groupId ? 'Move to Group' : 'Add to Group',
+          key: 'g',
           submenu: [
             { label: 'New Group', id: 'group-new' },
             'separator',
             ...otherGroups.map((g) => ({ label: groupLabel(g), id: `group:${g.id}`, swatch: groupColor(g) })),
           ],
         }
-      : { label: project.groupId ? 'Move to New Group' : 'Add to New Group', id: 'group-new' },
+      : { label: project.groupId ? 'Move to New Group' : 'Add to New Group', id: 'group-new', key: 'g' },
   );
-  if (project.groupId) entries.push({ label: 'Remove from Group', id: 'ungroup' });
+  if (project.groupId) entries.push({ label: 'Remove from Group', id: 'ungroup', key: 'u' });
   entries.push(
     'separator',
-    { label: project.folded ? 'Unfold' : 'Fold', id: 'fold' },
-    { label: 'Fold Others', id: 'fold-others', enabled: others.some((p) => !p.folded) },
-    { label: 'Unfold All', id: 'unfold-all', enabled: state.projects.some((p) => p.folded) },
+    { label: project.folded ? 'Unfold' : 'Fold', id: 'fold', key: 'e' },
+    { label: 'Fold Others', id: 'fold-others', key: 'o', enabled: others.some((p) => !p.folded) },
+    { label: 'Unfold All', id: 'unfold-all', key: 'a', enabled: state.projects.some((p) => p.folded) },
     'separator',
-    { label: 'Choose Icon…', id: 'icon-choose' },
+    { label: 'Choose Icon…', id: 'icon-choose', key: 'i' },
     { label: 'Detect Icon Again', id: 'icon-detect' },
     'separator',
-    { label: 'Reveal in Finder', id: 'reveal' },
+    { label: 'Reveal in Finder', id: 'reveal', key: 'f' },
     'separator',
-    { label: 'Close Project', id: 'close' },
+    { label: 'Close Project', id: 'close', key: 'c' },
   );
   const choice = await showMenu(entries, at);
   // The project may have been closed while the menu was open.
@@ -1657,6 +1669,60 @@ async function addProject(group?: ProjectGroup) {
   if (group && state.groups.includes(group) && project.groupId !== group.id) joinGroup(project, group);
   activateProject(project.id);
   if (!existing) addPane('claude', project);
+}
+
+/** Opens a Claude session in ~/other-projects that makes a new project's folder and moves into it. */
+async function newProject() {
+  const dir = await api.newProjectFolder();
+  const project = projectFor(dir) ?? createProject(dir);
+  if (state.activeProjectId !== project.id) activateProject(project.id);
+  const v = addPane('claude', project, { newProject: true });
+  if (!v) return;
+  v.pane.title = 'New project';
+  renderTitle(v);
+  save();
+}
+
+/** Claude made the project's folder; the session moves there now if its turn is over, else when it ends. */
+function onMoveRequest(paneId: string, dir: string) {
+  const v = views.get(paneId);
+  if (!v) return;
+  v.moveTo = dir;
+  if (!isWorking(v)) void moveSession(v);
+}
+
+/**
+ * Reopens a session in the project of the folder Claude moved it to, opening that folder as a
+ * project if needed. The session is stopped and its transcript filed under the new folder, so it
+ * resumes there; the old pane goes, and the project tab follows it when the old one was in view.
+ */
+async function moveSession(v: PaneView) {
+  const dir = v.moveTo!;
+  v.moveTo = undefined;
+  const { sessionId, bgId, title, customTitle, unread } = v.pane;
+  api.kill(v.pane.id);
+  v.activity = `Moving to ${folderName(dir)}`;
+  setStatus(v, 'starting');
+  const res = await api.moveSession(sessionId, bgId, dir);
+  if (views.get(v.pane.id) !== v) return;
+  if (!res.ok) {
+    v.term.writeln(`\r\n\x1b[31mCould not move the session to ${dir}: ${res.error}\x1b[0m`);
+    void spawn(v, true);
+    return;
+  }
+  const follow = state.activeProjectId === v.project.id;
+  closePane(v, { ask: false, stop: false });
+  const project = projectFor(dir) ?? createProject(dir);
+  if (follow) activateProject(project.id);
+  const moved = addPane('claude', project, { sessionId, title: customTitle });
+  if (!moved) return;
+  moved.pane.title = title;
+  moved.pane.transcript = res.transcript;
+  moved.pane.unread = unread;
+  markUnread(sessionId, false);
+  renderTitle(moved);
+  renderTabs();
+  save();
 }
 
 const projectBusy = (project: ProjectState) => project.panes.some((p) => views.has(p.id) && isWorking(views.get(p.id)!));
@@ -1980,6 +2046,11 @@ const SOURCES: Record<string, string> = {
 const sessionChips = new Map<string, HTMLElement>();
 /** Sessions being closed or deleted, with what the row says meanwhile. */
 const pendingSessions = new Map<string, string>();
+/** Rows picked with Cmd- and Shift-click, for acting on several at once; the anchor is where a Shift-click range starts. */
+const selectedSessions = new Set<string>();
+let selectionAnchor: string | undefined;
+/** Session ids in the order the panel shows them, for Shift-click ranges. */
+let shownSessionIds: string[] = [];
 
 let agents: AgentSession[] = [];
 /** When `agents` was asked for. */
@@ -2269,16 +2340,120 @@ function renderSessionRow(r: SessionRow): HTMLElement {
   if (r.pinned) top.append(iconEl(ICONS.pin, 'srow-pin'));
   top.append(h('span', 'srow-title', r.title), chip, more);
   row.append(top, h('div', 'srow-where', r.where), h('div', 'srow-activity', pending ?? r.detail));
+  if (selectedSessions.has(r.sessionId)) row.classList.add('selected');
   row.title = r.tooltip;
+  // Shift-click would otherwise select the text of every row it passes over.
+  row.addEventListener('mousedown', (e) => {
+    if (e.shiftKey) e.preventDefault();
+  });
   row.addEventListener('click', (e) => {
-    if (more.contains(e.target as Node)) void sessionRowMenu(r, more);
-    else r.open?.();
+    if (more.contains(e.target as Node)) return void rowMenu(r, more);
+    if (e.shiftKey) return selectRange(r.sessionId);
+    if (e.metaKey) return toggleSelected(r.sessionId);
+    clearSelection();
+    r.open?.();
   });
   row.addEventListener('contextmenu', (e) => {
     e.preventDefault();
-    void sessionRowMenu(r, pointer(e));
+    void rowMenu(r, pointer(e));
   });
   return row;
+}
+
+/** The menu for a row, or for every selected row when it is one of several. */
+function rowMenu(r: SessionRow, at: MenuAnchor) {
+  if (selectedSessions.has(r.sessionId) && selectedSessions.size > 1) {
+    const rows = sessionRows().filter((s) => selectedSessions.has(s.sessionId));
+    return void sessionRowsMenu(rows, at);
+  }
+  clearSelection();
+  void sessionRowMenu(r, at);
+}
+
+function toggleSelected(sessionId: string) {
+  if (!selectedSessions.delete(sessionId)) selectedSessions.add(sessionId);
+  selectionAnchor = sessionId;
+  renderSessions();
+}
+
+/** Selects the rows from the anchor to this one, as Finder does. */
+function selectRange(sessionId: string) {
+  const from = shownSessionIds.indexOf(selectionAnchor ?? '');
+  const to = shownSessionIds.indexOf(sessionId);
+  selectedSessions.clear();
+  if (from < 0) {
+    selectedSessions.add(sessionId);
+    selectionAnchor = sessionId;
+  } else {
+    for (const id of shownSessionIds.slice(Math.min(from, to), Math.max(from, to) + 1)) selectedSessions.add(id);
+  }
+  renderSessions();
+}
+
+function clearSelection() {
+  if (!selectedSessions.size) return;
+  selectedSessions.clear();
+  selectionAnchor = undefined;
+  renderSessions();
+}
+
+async function sessionRowsMenu(rows: SessionRow[], at: MenuAnchor) {
+  const list = rows.filter((r) => !pendingSessions.has(r.sessionId));
+  if (!list.length) return;
+  const n = list.length;
+  const unread = !list.some((r) => r.unread);
+  const closable = list.filter((r) => r.view || r.live);
+  const archived = !list.every((r) => r.archived);
+  const choice = await showMenu(
+    [
+      { label: unread ? `Mark ${n} as Unread` : `Mark ${n} as Read`, id: 'unread', key: 'u' },
+      'separator',
+      { label: closable.length ? `Close ${closable.length} Sessions` : 'Close Sessions', id: 'close', key: 'c', enabled: closable.length > 0 },
+      archived ? { label: `Archive ${n} Sessions`, id: 'archive', key: 'a' } : { label: `Unarchive ${n} Sessions`, id: 'unarchive', key: 'a' },
+      'separator',
+      { label: `Delete ${n} Sessions…`, id: 'delete', key: 'd', danger: true },
+    ],
+    at,
+  );
+  if (!choice) return;
+  // Panes closed while the menu was open are left out.
+  const still = list.filter((r) => !r.view || views.get(r.view.pane.id) === r.view);
+  selectedSessions.clear();
+  selectionAnchor = undefined;
+  switch (choice) {
+    case 'unread':
+      for (const r of still) {
+        if (r.view) setUnread(r.view, unread);
+        else markUnread(r.sessionId, unread);
+      }
+      renderSessions();
+      return save();
+    case 'close':
+      if (!confirmClose(still)) return renderSessions();
+      await Promise.all(still.map((r) => closeSession(r, false)));
+      return renderSessions();
+    case 'archive':
+      if (!confirmClose(still)) return renderSessions();
+      await Promise.all(still.map((r) => archiveSession(r, true, false)));
+      return renderSessions();
+    case 'unarchive':
+      await Promise.all(still.map((r) => archiveSession(r, false)));
+      return renderSessions();
+    case 'delete':
+      return void deleteSessions(still);
+  }
+}
+
+/** One question for closing several sessions, asked only when one of them works or runs outside Liszt. */
+function confirmClose(rows: SessionRow[]): boolean {
+  const busy = rows.filter((r) => (r.view ? isWorking(r.view) : r.live && r.dot === 'running'));
+  const outside = rows.filter((r) => !r.view && r.live && !r.bgId);
+  if (!busy.length && !outside.length) return true;
+  const why = [
+    busy.length ? `${busy.length} still working` : '',
+    outside.length ? `${outside.length} running outside Liszt` : '',
+  ].filter(Boolean);
+  return confirm(`Close ${rows.length} sessions?\n\n${why.join(', ')}. Their conversations are kept and can be resumed.`);
 }
 
 async function sessionRowMenu(r: SessionRow, at: MenuAnchor) {
@@ -2286,13 +2461,13 @@ async function sessionRowMenu(r: SessionRow, at: MenuAnchor) {
   const canClose = Boolean(r.view) || r.live;
   const choice = await showMenu(
     [
-      { label: r.view ? 'Show Session' : 'Open in Liszt', id: 'open', enabled: Boolean(r.open) },
-      { label: r.unread ? 'Mark as Read' : 'Mark as Unread', id: 'unread' },
+      { label: r.view ? 'Show Session' : 'Open in Liszt', id: 'open', key: 'o', enabled: Boolean(r.open) },
+      { label: r.unread ? 'Mark as Read' : 'Mark as Unread', id: 'unread', key: 'u' },
       'separator',
-      { label: 'Close Session', id: 'close', enabled: canClose },
-      r.archived ? { label: 'Unarchive', id: 'unarchive' } : { label: canClose ? 'Close and Archive' : 'Archive', id: 'archive' },
+      { label: 'Close Session', id: 'close', key: 'c', enabled: canClose },
+      r.archived ? { label: 'Unarchive', id: 'unarchive', key: 'a' } : { label: canClose ? 'Close and Archive' : 'Archive', id: 'archive', key: 'a' },
       'separator',
-      { label: 'Delete Session…', id: 'delete', danger: true },
+      { label: 'Delete Session…', id: 'delete', key: 'd', danger: true },
     ],
     at,
   );
@@ -2313,7 +2488,7 @@ async function sessionRowMenu(r: SessionRow, at: MenuAnchor) {
     case 'unarchive':
       return void archiveSession(r, false);
     case 'delete':
-      return void deleteSession(r);
+      return void deleteSessions([r]);
   }
 }
 
@@ -2331,13 +2506,14 @@ async function sessionAction(r: SessionRow, label: string, act: Promise<GitResul
 /**
  * Ends whatever runs a session: its Liszt pane, `claude stop` for a background session, or the
  * process of an interactive one elsewhere. The conversation is kept. False when it keeps running.
+ * `ask: false` skips the question when the caller already asked.
  */
-async function closeSession(r: SessionRow): Promise<boolean> {
-  if (r.view) return closePane(r.view);
+async function closeSession(r: SessionRow, ask = true): Promise<boolean> {
+  if (r.view) return closePane(r.view, { ask });
   if (!r.live) return true;
   const busy = r.dot === 'running';
   // Ending a process in another terminal or the Claude app is less expected than stopping an idle background session.
-  if ((busy || !r.bgId) && !confirm(`Close "${r.title}"?\n\nIt runs outside Liszt${busy ? ' and is still working' : ''}. Its conversation is kept and can be resumed.`)) return false;
+  if (ask && (busy || !r.bgId) && !confirm(`Close "${r.title}"?\n\nIt runs outside Liszt${busy ? ' and is still working' : ''}. Its conversation is kept and can be resumed.`)) return false;
   if (!(await sessionAction(r, 'Closing…', api.closeSession(r.sessionId, r.bgId)))) return false;
   // Until the next poll: an interactive session is no longer listed, a background one is stopped.
   agents = agents.flatMap((a) => (a.sessionId !== r.sessionId ? [a] : a.kind === 'background' ? [{ ...a, ended: true, state: 'stopped' }] : []));
@@ -2346,8 +2522,8 @@ async function closeSession(r: SessionRow): Promise<boolean> {
 }
 
 /** Archiving closes the session first; its title and folder are kept, as nothing may list it once it is closed. */
-async function archiveSession(r: SessionRow, archived: boolean) {
-  if (archived && (r.view || r.live) && !(await closeSession(r))) return;
+async function archiveSession(r: SessionRow, archived: boolean, ask = true) {
+  if (archived && (r.view || r.live) && !(await closeSession(r, ask))) return;
   const mark = state.sessionMarks[r.sessionId];
   state.sessionMarks[r.sessionId] = archived
     ? { archived, unread: mark?.unread, title: r.title, cwd: r.cwd, at: Date.now() }
@@ -2356,21 +2532,36 @@ async function archiveSession(r: SessionRow, archived: boolean) {
   save();
 }
 
-async function deleteSession(r: SessionRow) {
-  const how = `${
-    r.bgId ? `Claude Code removes the background session ${r.bgId} (claude rm), and its worktree when nothing would be lost. ` : ''
-  }Its conversation is moved to the Trash and can no longer be resumed.`;
-  const running = r.view || r.live ? '\n\nIt is closed first.' : '';
+/** Deletes the sessions after one question, all at once. */
+async function deleteSessions(rows: SessionRow[]) {
+  const one = rows.length === 1 ? rows[0] : undefined;
+  const bg = rows.filter((r) => r.bgId);
+  const running = rows.filter((r) => r.view || r.live).length;
   // Liszt does not write to the app's files, so the app keeps its own entry.
-  const inApp = appSessions.some((s) => s.sessionId === r.sessionId) ? '\n\nThe Claude app keeps listing it until you delete it there.' : '';
-  if (!confirm(`Delete "${r.title}"?\n\n${how}${running}${inApp}`)) return;
-  // Claude Code deletes a background session itself; stopping it as well would race with that.
-  if (r.view) closePane(r.view, { ask: false, stop: false });
-  if (!(await sessionAction(r, 'Deleting…', api.deleteSession(r.sessionId, r.bgId)))) return;
-  state.sessionMarks[r.sessionId] = { deleted: true, at: Date.now() };
-  agents = agents.filter((a) => a.sessionId !== r.sessionId);
-  // A task would otherwise resume the deleted conversation; it starts a new one in its worktree instead.
-  for (const project of state.projects) for (const task of project.tasks) if (task.sessionId === r.sessionId) task.sessionId = undefined;
+  const inApp = rows.filter((r) => appSessions.some((s) => s.sessionId === r.sessionId)).length;
+  const question = one
+    ? `Delete "${one.title}"?\n\n${
+        one.bgId ? `Claude Code removes the background session ${one.bgId} (claude rm), and its worktree when nothing would be lost. ` : ''
+      }Its conversation is moved to the Trash and can no longer be resumed.${running ? '\n\nIt is closed first.' : ''}${
+        inApp ? '\n\nThe Claude app keeps listing it until you delete it there.' : ''
+      }`
+    : `Delete ${rows.length} sessions?\n\n${
+        bg.length ? `Claude Code removes ${bg.length} background sessions (claude rm), and their worktrees when nothing would be lost. ` : ''
+      }Their conversations are moved to the Trash and can no longer be resumed.${running ? `\n\n${running} running are closed first.` : ''}${
+        inApp ? `\n\nThe Claude app keeps listing ${inApp} of them until you delete them there.` : ''
+      }`;
+  if (!confirm(question)) return renderSessions();
+  await Promise.all(
+    rows.map(async (r) => {
+      // Claude Code deletes a background session itself; stopping it as well would race with that.
+      if (r.view) closePane(r.view, { ask: false, stop: false });
+      if (!(await sessionAction(r, 'Deleting…', api.deleteSession(r.sessionId, r.bgId)))) return;
+      state.sessionMarks[r.sessionId] = { deleted: true, at: Date.now() };
+      agents = agents.filter((a) => a.sessionId !== r.sessionId);
+      // A task would otherwise resume the deleted conversation; it starts a new one in its worktree instead.
+      for (const project of state.projects) for (const task of project.tasks) if (task.sessionId === r.sessionId) task.sessionId = undefined;
+    }),
+  );
   renderSessions();
   save();
 }
@@ -2407,6 +2598,9 @@ function renderSessions() {
   }
   if (!els.length) els.push(h('div', 'side-note', all.length ? 'No sessions match.' : 'No Claude sessions yet.'));
   sessionListEl.replaceChildren(...els);
+  shownSessionIds = heads.flatMap(([key]) => groups.get(key)!.map((r) => r.sessionId));
+  // A row a filter or search hides, or one that is gone, drops out of the selection.
+  for (const id of selectedSessions) if (!shownSessionIds.includes(id)) selectedSessions.delete(id);
 }
 
 /** Opens a session in a new pane of its folder's project, adding the folder as a project if needed. */
@@ -2510,9 +2704,9 @@ function onAgents(list: AgentSession[], asked: number) {
 
 // --- Claude hooks ------------------------------------------------------------------------------
 
-function notify(v: PaneView, body: string) {
+function notify(v: PaneView, body: string, kind: NotifyKind) {
   if (document.hasFocus() && state.activeProjectId === v.project.id && isVisible(v)) return;
-  api.notify({ title: `${v.project.name} · ${displayTitle(v)}`, body, paneId: v.pane.id });
+  api.notify({ title: `${v.project.name} · ${displayTitle(v)}`, body, paneId: v.pane.id, kind });
 }
 
 function updateBadge() {
@@ -2572,7 +2766,7 @@ function onHook(ev: HookEvent) {
       if (v.status === 'running') {
         v.activity = ev.message || 'Waiting for your input';
         setStatus(v, 'attention', true);
-        notify(v, v.activity);
+        notify(v, v.activity, 'attention');
       }
       break;
     case 'Stop':
@@ -2584,8 +2778,9 @@ function onHook(ev: HookEvent) {
         const took = duration(Date.now() - v.since);
         v.activity = `Finished in ${took}${v.actions ? ` · ${v.actions} tool ${v.actions === 1 ? 'call' : 'calls'}` : ''}`;
         finishTurn(v);
-        notify(v, `Finished in ${took}`);
+        notify(v, v.activity, 'done');
       }
+      if (v.moveTo && !isWorking(v)) void moveSession(v);
       break;
   }
 
@@ -2724,6 +2919,8 @@ function onMenu(command: string) {
     case 'close-pane':
       if (focused) closePane(focused);
       return;
+    case 'new-project':
+      return void newProject();
     case 'add-project':
       return void addProject();
     case 'close-project': {
@@ -2776,6 +2973,7 @@ api.onHook(onHook);
 api.onAgents(onAgents);
 api.onAppSessions(onAppSessions);
 api.onTranscriptSessions(onTranscriptSessions);
+api.onMoveRequest(onMoveRequest);
 api.onMenu(onMenu);
 api.onFocusPane((id) => {
   const v = views.get(id);
@@ -2792,6 +2990,19 @@ for (const [id, svg] of [
   byId(id).innerHTML = svg;
 }
 byId('add-project').innerHTML = ICONS.plus;
+byId('new-project').insertAdjacentHTML('afterbegin', ICONS.plus);
+byId('new-project').addEventListener('click', () => void newProject());
+// ⌃N, as the menu shows it: taken before the terminal, where it would step through the prompt history.
+window.addEventListener(
+  'keydown',
+  (e) => {
+    if (e.code !== 'KeyN' || !e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+    e.preventDefault();
+    e.stopPropagation();
+    void newProject();
+  },
+  true,
+);
 byId('add-project').addEventListener('click', () => void addProject());
 byId('empty-add').addEventListener('click', () => void addProject());
 byId('new-claude').addEventListener('click', () => addPane('claude'));
@@ -2804,6 +3015,9 @@ sessionSearch.addEventListener('keydown', (e) => {
   if (e.isComposing) return;
   if (e.key === 'Enter') {
     sessionListEl.querySelector<HTMLElement>('.srow:not(.gone)')?.click();
+  } else if (e.key === 'Escape' && selectedSessions.size) {
+    e.preventDefault();
+    clearSelection();
   } else if (e.key === 'Escape' && !sessionSearch.value && focusedPaneId) {
     e.preventDefault();
     focusPane(focusedPaneId);

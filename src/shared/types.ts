@@ -28,6 +28,8 @@ export interface PaneState {
    * quits; found idle on the next start, it finished meanwhile and its reply is unread.
    */
   working?: boolean;
+  /** Opened by New Project: Claude is told how to give the project a folder and move the session there. */
+  newProject?: boolean;
 }
 
 export type TaskStatus = 'todo' | 'doing' | 'review' | 'done';
@@ -101,6 +103,20 @@ export interface ProjectState {
   autopilot: AutopilotState;
 }
 
+/** Why a session is announced: it asks for input, or its turn ended. */
+export type NotifyKind = 'attention' | 'done';
+
+/** Which channels announce a session; kept by the main process, set from the Notifications menu. */
+export interface NotifyPrefs {
+  /** Liszt's own banner in the corner of the screen. */
+  banner: boolean;
+  /** macOS Notification Center. */
+  system: boolean;
+  sound: boolean;
+  /** Bounces the Dock icon while Liszt is in the background. */
+  dock: boolean;
+}
+
 export interface AppState {
   version: 1;
   projects: ProjectState[];
@@ -148,6 +164,8 @@ export interface SpawnOptions {
   transcript?: string;
   /** Background session to open with `claude attach`; resumed by `sessionId` once it is no longer running. */
   attach?: string;
+  /** A new session started by New Project, which gets the instructions for moving to its project's folder. */
+  newProject?: boolean;
 }
 
 /**
@@ -262,5 +280,8 @@ export interface GitInfo {
 }
 
 export type WorktreeResult = { ok: true; dir: string; cwd: string; branch: string } | { ok: false; error: string };
+
+/** Where a moved session's transcript now is, so the session resumes from its new folder. */
+export type MoveResult = { ok: true; transcript: string } | { ok: false; error: string };
 
 export type GitResult = { ok: true } | { ok: false; error: string };

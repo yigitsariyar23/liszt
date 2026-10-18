@@ -1,4 +1,4 @@
-import { BrowserWindow, Menu, Notification, app, clipboard, dialog, ipcMain, nativeImage, shell } from 'electron';
+import { BrowserWindow, Menu, app, clipboard, dialog, ipcMain, nativeImage, shell } from 'electron';
 import type { MenuItemConstructorOptions } from 'electron';
 import * as pty from 'node-pty';
 import { execFile } from 'node:child_process';
@@ -15,6 +15,9 @@ import type {
   GitInfo,
   GitResult,
   HookEvent,
+  MoveResult,
+  NotifyKind,
+  NotifyPrefs,
   ProjectIcon,
   ProjectKind,
   SpawnOptions,
@@ -22,6 +25,7 @@ import type {
   TranscriptSession,
   WorktreeResult,
 } from '../shared/types';
+import { loadNotifyPrefs, notify, notifyPrefs, setNotifyPref } from './notifier';
 
 if (process.env.LISZT_USER_DATA) app.setPath('userData', process.env.LISZT_USER_DATA);
 if (!app.requestSingleInstanceLock()) app.quit();
@@ -91,7 +95,7 @@ const shellEnv = readShellEnv();
 const hookUrlFile = () => path.join(userData(), 'hook-url');
 const shellQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
-function hookSettings(paneId: string): string {
+function hookSettings(paneId: string, allow: string[] = []): string {
   const command =
     `curl -s -m 2 --noproxy '*' -H 'Content-Type: application/json' ` +
     `--data-binary @- "$(cat ${shellQuote(hookUrlFile())} 2>/dev/null)&pane=${paneId}" >/dev/null 2>&1 || true`;
@@ -106,6 +110,7 @@ function hookSettings(paneId: string): string {
       SessionEnd: entry,
       PostToolUse: toolEntry,
     },
+    ...(allow.length ? { permissions: { allow } } : {}),
   });
 }
 
@@ -141,6 +146,10 @@ function startHookServer(): Promise<string> {
     const chunks: Buffer[] = [];
     req.on('data', (c: Buffer) => chunks.push(c));
     req.on('end', () => {
+      if (paneId && params.get('token') === token && params.has('move')) {
+        res.end(moveRequest(paneId, params.get('move') ?? ''));
+        return;
+      }
       res.end();
       if (!paneId || params.get('token') !== token) return;
       let payload: Record<string, unknown>;
@@ -220,6 +229,76 @@ function bashCommand(tool: unknown, input: unknown): string | undefined {
   return typeof command === 'string' ? command.slice(0, 2000) : undefined;
 }
 
+// --- New projects ------------------------------------------------------------------------------
+// New Project opens a Claude session in ~/other-projects to work out a new project with the user.
+// Its system prompt tells Claude where project folders live (every ~/*-projects folder) and how to
+// hand the session over once it has made one: a script asks Liszt, through the hook server, to move
+// the session there. Liszt does it when the turn ends, since a session cannot change folder while it
+// runs: it stops the session, moves its transcript to the new folder and resumes it there.
+
+const incubatorDir = () => path.join(os.homedir(), 'other-projects');
+const moveScript = () => path.join(userData(), 'liszt-move');
+
+/** The folders projects are kept in: ~/other-projects, ~/chaos-projects, ~/unity-projects… */
+function projectRoots(): string[] {
+  const home = os.homedir();
+  const roots = fs
+    .readdirSync(home, { withFileTypes: true })
+    .filter((d) => d.isDirectory() && d.name.endsWith('-projects'))
+    .map((d) => path.join(home, d.name));
+  return roots.includes(incubatorDir()) ? roots : [incubatorDir(), ...roots];
+}
+
+/** The move script and its pane, as Claude runs it and its permission rule matches it. */
+const moveCommand = (paneId: string) => `${shellQuote(moveScript())} ${paneId}`;
+
+function writeMoveScript() {
+  const script = `#!/bin/sh
+# Asks Liszt to move this New Project session into its project's folder: liszt-move <pane> <folder>
+dir=$(cd "$2" 2>/dev/null && pwd -P) || { echo "No such folder: $2" >&2; exit 1; }
+url=$(cat ${shellQuote(hookUrlFile())} 2>/dev/null) || { echo "Liszt is not running." >&2; exit 1; }
+reply=$(curl -s -m 5 --noproxy '*' -G --data-urlencode "pane=$1" --data-urlencode "move=$dir" "$url") || { echo "Liszt did not answer." >&2; exit 1; }
+echo "$reply"
+case $reply in Moving*) ;; *) exit 1 ;; esac
+`;
+  fs.writeFileSync(moveScript(), script, { mode: 0o755 });
+  fs.chmodSync(moveScript(), 0o755);
+}
+
+function newProjectPrompt(paneId: string): string {
+  const home = os.homedir();
+  const roots = projectRoots().map((r) => `~/${path.relative(home, r)}`);
+  return [
+    `This session was opened from Liszt's New Project button to start a new project with the user. It runs in ~/${path.relative(home, incubatorDir())}, which only holds project folders and is not the new project's home.`,
+    `Project folders live in: ${roots.join(', ')}.`,
+    `Work out with the user what the project is. Once it can be named, choose a short kebab-case folder name and the folder it belongs in (ask the user when the right one is not obvious), create the project's folder there, then run:`,
+    `${moveCommand(paneId)} <the new folder>`,
+    `It confirms the request. End your turn right after with a short note: Liszt then moves this conversation into the new folder and opens it in a project tab of its own, where the work goes on. Do not build the project before the move.`,
+    `Once your working directory is that new folder, the move is done and these instructions no longer apply.`,
+  ].join('\n');
+}
+
+/** Answers the move script; the renderer moves the session when its turn ends. */
+function moveRequest(paneId: string, dir: string): string {
+  if (!PANE_ID.test(paneId)) return `Not a Liszt pane: ${paneId}`;
+  let real: string;
+  try {
+    real = fs.realpathSync(dir);
+    if (!fs.statSync(real).isDirectory()) return `Not a folder: ${dir}`;
+  } catch {
+    return `No such folder: ${dir}`;
+  }
+  const roots = projectRoots().map((r) => (fs.existsSync(r) ? fs.realpathSync(r) : r));
+  if (!roots.some((r) => real.startsWith(`${r}/`))) return `Not inside a projects folder (${roots.join(', ')}): ${real}`;
+  send('move-request', paneId, real);
+  return `Moving this session to ${real} when this turn ends.`;
+}
+
+ipcMain.handle('projects:incubator', () => {
+  fs.mkdirSync(incubatorDir(), { recursive: true });
+  return incubatorDir();
+});
+
 // --- Terminals ---------------------------------------------------------------------------------
 // A Claude pane runs a Claude Code background session: `claude --bg` starts it on Claude Code's
 // background server and the pane's terminal runs `claude attach` on it. Quitting Liszt ends only the
@@ -240,9 +319,16 @@ function nextSpawn(paneId: string): number {
   return n;
 }
 
+/** Claude Code records a session's system prompt on its first request and reuses it on every resume. */
+const newProjectArgs = (o: SpawnOptions, resume: boolean) =>
+  o.newProject && !resume ? ['--append-system-prompt', newProjectPrompt(o.paneId)] : [];
+
+/** Auto mode's permission check reads moving a session's transcript as tampering, so the move script is allowed outright. */
+const paneSettings = (o: SpawnOptions) => hookSettings(o.paneId, o.newProject ? [`Bash(${moveCommand(o.paneId)} *)`] : []);
+
 /** Starts a background session for a pane; null when Claude Code would not. */
 async function startBackground(o: SpawnOptions, resume: boolean, sessionId: string, cwd: string): Promise<{ bgId: string; sessionId: string } | null> {
-  const args = ['--bg', '--settings', hookSettings(o.paneId)];
+  const args = ['--bg', '--settings', paneSettings(o), ...newProjectArgs(o, resume)];
   // A resumed session keeps its id.
   if (resume) args.push('--resume', sessionId);
   // `--` keeps a prompt that starts with a dash from being read as an option.
@@ -315,7 +401,7 @@ ipcMain.handle('pty:spawn', async (_e, o: SpawnOptions): Promise<SpawnResult> =>
       ? [env.SHELL || '/bin/zsh', ['-l']]
       : bgId
         ? [claude, ['attach', bgId]]
-        : [claude, ['--settings', hookSettings(o.paneId), resume ? '--resume' : '--session-id', sessionId]];
+        : [claude, ['--settings', paneSettings(o), ...newProjectArgs(o, resume), resume ? '--resume' : '--session-id', sessionId]];
   if (o.kind === 'claude' && !bgId && o.prompt && !resume) args.push('--', o.prompt);
 
   let p: pty.IPty;
@@ -795,6 +881,41 @@ ipcMain.handle('sessions:delete', (_e, sessionId: string, bgId?: string) => {
   });
 });
 
+/**
+ * Moves a session to another folder (see New projects): stops it, files its transcript under the
+ * new folder, where `claude --resume` looks for it, and removes the background session that ran it
+ * in the old one, which would otherwise be listed and attached under the same session id.
+ */
+ipcMain.handle('sessions:move', async (_e, sessionId: string, bgId: string | undefined, to: string): Promise<MoveResult> => {
+  if (!SESSION_ID.test(sessionId)) return { ok: false, error: `Not a session id: ${sessionId}` };
+  const list = await listAgents();
+  if (!list) return { ok: false, error: 'Claude Code did not list its sessions.' };
+  try {
+    const jobs = list.filter((a) => a.kind === 'background' && a.id && (a.sessionId === sessionId || a.id === bgId));
+    for (const job of jobs) if (!job.ended) await runClaude(['stop', job.id!]);
+    await endInteractive(list, sessionId);
+    const root = path.join(await claudeDir(), 'projects');
+    const dest = path.join(root, projectFolder(to));
+    await fs.promises.mkdir(dest, { recursive: true });
+    for (const dir of await readDir(root)) {
+      if (dir === projectFolder(to)) continue;
+      for (const name of [`${sessionId}.jsonl`, sessionId]) {
+        const file = path.join(root, dir, name);
+        if (fs.existsSync(file) && !fs.existsSync(path.join(dest, name))) await fs.promises.rename(file, path.join(dest, name));
+      }
+    }
+    const transcript = path.join(dest, `${sessionId}.jsonl`);
+    if (!fs.existsSync(transcript)) return { ok: false, error: 'The session has no transcript to move.' };
+    // Its transcript is gone from the old folder, so this deletes nothing but the background session.
+    for (const job of jobs) await runClaude(['rm', job.id!], 60_000).catch(() => {});
+    return { ok: true, transcript };
+  } catch (err) {
+    return { ok: false, error: errorText(err) };
+  } finally {
+    void pollAgents();
+  }
+});
+
 // --- State, dialogs, notifications -------------------------------------------------------------
 
 ipcMain.handle('state:load', (): AppState | null => {
@@ -820,16 +941,13 @@ ipcMain.on('open:external', (_e, url: string) => {
   if (/^https?:\/\//.test(url)) void shell.openExternal(url);
 });
 
-ipcMain.on('notify', (_e, n: { title: string; body: string; paneId: string }) => {
-  if (!Notification.isSupported()) return;
-  const note = new Notification({ title: n.title, body: n.body });
-  note.on('click', () => {
-    win?.show();
-    win?.focus();
-    send('focus-pane', n.paneId);
-  });
-  note.show();
-});
+function openPane(paneId: string) {
+  win?.show();
+  win?.focus();
+  send('focus-pane', paneId);
+}
+
+ipcMain.on('notify', (_e, n: { title: string; body: string; paneId: string; kind: NotifyKind }) => notify(n, win, openPane));
 
 ipcMain.on('badge', (_e, text: string) => app.dock?.setBadge(text));
 
@@ -1071,6 +1189,7 @@ function buildMenu() {
         { label: 'Split Down with New Session', accelerator: 'CmdOrCtrl+Shift+D', click: cmd('split-down') },
         { label: 'Close Session', accelerator: 'CmdOrCtrl+W', click: cmd('close-pane') },
         { type: 'separator' },
+        { label: 'New Project…', accelerator: 'Ctrl+N', registerAccelerator: false, click: cmd('new-project') },
         { label: 'Add Project…', accelerator: 'CmdOrCtrl+O', click: cmd('add-project') },
         { label: 'Close Project', accelerator: 'CmdOrCtrl+Shift+W', click: cmd('close-project') },
       ],
@@ -1096,9 +1215,38 @@ function buildMenu() {
         { role: 'toggleDevTools' },
       ],
     },
+    { label: 'Notifications', submenu: notificationsMenu() },
     { label: 'Window', submenu: [{ role: 'minimize' }, { role: 'zoom' }, { type: 'separator' }, { role: 'front' }] },
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+/** Which channels announce a session that wants input or has finished, and a way to try them. */
+function notificationsMenu(): MenuItemConstructorOptions[] {
+  const prefs = notifyPrefs();
+  const toggle = (key: keyof NotifyPrefs, label: string): MenuItemConstructorOptions => ({
+    label,
+    type: 'checkbox',
+    checked: prefs[key],
+    click: (item) => setNotifyPref(key, item.checked),
+  });
+  const test = (kind: NotifyKind) => () =>
+    notify(
+      kind === 'attention'
+        ? { kind, paneId: '', title: 'Liszt · Test', body: 'Claude needs your permission to use Bash' }
+        : { kind, paneId: '', title: 'Liszt · Test', body: 'Finished in 2m 14s · 12 tool calls' },
+      null,
+      openPane,
+    );
+  return [
+    toggle('banner', 'Liszt Banner'),
+    toggle('sound', 'Sound'),
+    toggle('dock', 'Bounce Dock Icon'),
+    toggle('system', 'macOS Notification Center'),
+    { type: 'separator' },
+    { label: 'Test “Needs Input”', click: test('attention') },
+    { label: 'Test “Finished”', click: test('done') },
+  ];
 }
 
 function createWindow() {
@@ -1155,6 +1303,8 @@ app.on('second-instance', () => {
 app.whenReady().then(() => {
   fs.mkdirSync(userData(), { recursive: true });
   writeClaudeSettings();
+  writeMoveScript();
+  loadNotifyPrefs();
   hookUrl = startHookServer();
   buildMenu();
   createWindow();

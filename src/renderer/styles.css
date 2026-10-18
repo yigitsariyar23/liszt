@@ -440,6 +440,14 @@ body.resizing-row * {
   color: var(--text);
 }
 
+.tool.wide {
+  display: flex;
+  gap: 6px;
+  width: auto;
+  padding: 0 10px 0 8px;
+  font-size: 12px;
+}
+
 .tool.claude:hover {
   color: var(--accent);
 }
@@ -1393,6 +1401,15 @@ button.task-section-head:hover {
   background: color-mix(in srgb, var(--st-attention) 14%, transparent);
 }
 
+/* Picked with Cmd- or Shift-click, for acting on several at once. */
+.srow.selected,
+.srow.selected:hover,
+.srow.gone.selected,
+.srow.gone.selected:hover {
+  background: var(--accent-dim);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
 .srow-top {
   display: flex;
   align-items: center;
@@ -1624,6 +1641,17 @@ button.task-section-head:hover {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* The key that chooses the item. */
+.menu-key {
+  flex: none;
+  margin-left: 16px;
+  color: var(--faint);
+}
+
+.menu-item.active .menu-key {
+  color: var(--muted);
 }
 
 .menu-arrow {

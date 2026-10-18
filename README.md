@@ -75,6 +75,7 @@ ditto release/mac-arm64/Liszt.app /Applications/Liszt.app
 | ⌘T / ⇧⌘T | New Claude session / new shell (opens in the focused split) |
 | ⌘D / ⇧⌘D | Open a new Claude session split to the right / below |
 | ⌘W | Close the focused session |
+| ⌃N | New project: a Claude session in `~/other-projects` that makes the project's folder (in any `~/*-projects`) and moves itself into its own tab |
 | ⌘O / ⇧⌘W | Add project / close project |
 | ⌘1…9, ⇧⌘] / ⇧⌘[ | Switch between projects |
 | ⌘] / ⌘[ | Switch between session tabs |

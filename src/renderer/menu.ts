@@ -3,7 +3,7 @@ import { ICONS } from './icons';
 
 // Menus drawn by the app in its own style instead of macOS's native ones: every right-click menu and
 // the lists the dropdown buttons open. One menu is open at a time. It takes the keyboard while it is
-// open (arrows, Enter, Esc, typing the start of a label) without moving the focus, so the terminal
+// open (arrows, Enter, Esc, an item's own key, typing the start of a label) without moving the focus, so the terminal
 // that had it keeps it afterwards. A click outside closes it without reaching what is under it; a
 // right-click outside opens that spot's own menu instead.
 
@@ -18,6 +18,8 @@ export interface MenuItem {
   swatch?: string;
   /** Loses data, so it is drawn in red. */
   danger?: boolean;
+  /** A lowercase letter that chooses the item at once, shown at its right. */
+  key?: string;
   submenu?: MenuEntry[];
 }
 
@@ -152,6 +154,7 @@ export function showMenu(entries: MenuEntry[], at: MenuAnchor): Promise<string |
           row.append(dot);
         }
         row.append(h('span', 'menu-label', entry.label));
+        if (entry.key) row.append(h('span', 'menu-key', entry.key.toUpperCase()));
         if (entry.submenu) row.append(iconEl(ICONS.chevronRight, 'menu-arrow'));
         el.append(row);
         const index = level.items.length;
@@ -220,6 +223,12 @@ export function showMenu(entries: MenuEntry[], at: MenuAnchor): Promise<string |
             return;
         }
         if (e.key.length !== 1 || e.ctrlKey || e.altKey) return;
+        // An item's own key chooses it outright; other letters search the labels.
+        const own = level.items.findIndex(({ item }) => item.key === e.key.toLowerCase());
+        if (own >= 0) {
+          if (enabled(level.items[own].item)) highlight(level, own);
+          return activate(level, own, true);
+        }
         const now = performance.now();
         typed = now - typedAt < TYPE_AHEAD ? typed + e.key.toLowerCase() : e.key.toLowerCase();
         typedAt = now;
