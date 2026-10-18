@@ -16,4 +16,16 @@ if pgrep -x Liszt >/dev/null; then
 fi
 
 ditto release/mac-arm64/Liszt.app /Applications/Liszt.app
+
+# The Dock looks the icon up by bundle id, so a stray copy (the build output, an old checkout) can lend
+# it an old logo, and killall Dock alone keeps its icon cache. Only the installed copy stays registered.
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+"$LSREGISTER" -dump | awk '/^path:/{p=$2} /local\.liszt\.terminal/{print p}' | sort -u | while read -r app; do
+  [ "$app" = /Applications/Liszt.app ] || "$LSREGISTER" -u "$app" 2>/dev/null || true
+done
+touch /Applications/Liszt.app
+"$LSREGISTER" -f /Applications/Liszt.app
+rm -rf "$(getconf DARWIN_USER_CACHE_DIR)com.apple.dock.iconcache"
+killall Dock
+
 open /Applications/Liszt.app

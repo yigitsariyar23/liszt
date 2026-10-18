@@ -103,9 +103,11 @@ function showBanner(note: Note, open: (paneId: string) => void) {
     type: 'panel',
     webPreferences: { preload: path.join(__dirname, 'banner-preload.js') },
   });
-  // Above full-screen apps and on every Space, so it is seen wherever the user is.
+  // Above full-screen apps and on every Space, so it is seen wherever the user is. A panel gets there
+  // on its own; Electron's process-type switch for it would take Liszt out of the Dock for a moment,
+  // and the running dot under its icon often does not come back.
   win.setAlwaysOnTop(true, 'screen-saver');
-  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
   const banner: Banner = { win, note };
   banners.push(banner);
   layoutBanners();
