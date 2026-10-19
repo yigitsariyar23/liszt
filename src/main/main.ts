@@ -947,11 +947,13 @@ const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f-]{27}$/i;
 
 async function runClaude(args: string[], timeout = 15_000, cwd?: string): Promise<string> {
   const { env, claude } = await shellEnv;
-  return new Promise((resolve, reject) =>
-    execFile(claude, args, { env, cwd, encoding: 'utf8', timeout }, (err, out, stderr) =>
+  return new Promise((resolve, reject) => {
+    const child = execFile(claude, args, { env, cwd, encoding: 'utf8', timeout }, (err, out, stderr) =>
       err ? reject(new Error(stderr.trim() || out.trim() || err.message)) : resolve(out),
-    ),
-  );
+    );
+    // Given an open stdin, `claude --bg` waits about three seconds for a prompt on it before it starts.
+    child.stdin?.end();
+  });
 }
 
 async function exited(pid: number, ms: number): Promise<boolean> {
