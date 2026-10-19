@@ -2907,13 +2907,26 @@ function setFontSize(size: number) {
   save();
 }
 
-// A trackpad sends many small wheel deltas and a mouse one large one per notch, so they add up
-// until a step's worth has gathered.
+// The first wheel event after a pause is one step, so each notch of a slowly turned mouse wheel
+// counts however small macOS makes its delta. A trackpad swipe or a fast spin sends a stream of
+// events, and those add up until a step's worth has gathered.
 const WHEEL_STEP = 40;
+const WHEEL_PAUSE = 150;
 let wheelZoom = 0;
+let lastWheel = -Infinity;
 
 function zoomByWheel(e: WheelEvent) {
-  wheelZoom += e.deltaMode === WheelEvent.DOM_DELTA_LINE ? e.deltaY * 16 : e.deltaY;
+  const delta = e.deltaMode === WheelEvent.DOM_DELTA_LINE ? e.deltaY * 16 : e.deltaY;
+  const paused = e.timeStamp - lastWheel > WHEEL_PAUSE;
+  lastWheel = e.timeStamp;
+  if (!delta) return;
+  if (paused) {
+    wheelZoom = 0;
+    // Scrolling up makes the text bigger.
+    setFontSize(state.fontSize - Math.sign(delta));
+    return;
+  }
+  wheelZoom += delta;
   const steps = Math.trunc(wheelZoom / WHEEL_STEP);
   if (!steps) return;
   wheelZoom -= steps * WHEEL_STEP;
