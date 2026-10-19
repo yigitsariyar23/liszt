@@ -1,3 +1,6 @@
 node_modules/
 dist/
 release/
+
+# The file macOS writes into a folder that has a custom icon (its name ends in a carriage return).
+Icon
