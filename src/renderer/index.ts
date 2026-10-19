@@ -350,6 +350,13 @@ function createView(project: ProjectState, pane: PaneState): PaneView {
     save();
   });
   term.attachCustomKeyEventHandler((e) => handleKey(v, e));
+  // Cmd+scroll sizes the text like Cmd+= and Cmd+- instead of scrolling the terminal.
+  term.attachCustomWheelEventHandler((e) => {
+    if (!e.metaKey) return true;
+    e.preventDefault();
+    zoomByWheel(e);
+    return false;
+  });
   term.textarea?.addEventListener('focus', () => setFocused(v));
   el.addEventListener('mousedown', (e) => {
     setFocused(v);
@@ -2898,6 +2905,20 @@ function setFontSize(size: number) {
     scheduleFit(v);
   }
   save();
+}
+
+// A trackpad sends many small wheel deltas and a mouse one large one per notch, so they add up
+// until a step's worth has gathered.
+const WHEEL_STEP = 40;
+let wheelZoom = 0;
+
+function zoomByWheel(e: WheelEvent) {
+  wheelZoom += e.deltaMode === WheelEvent.DOM_DELTA_LINE ? e.deltaY * 16 : e.deltaY;
+  const steps = Math.trunc(wheelZoom / WHEEL_STEP);
+  if (!steps) return;
+  wheelZoom -= steps * WHEEL_STEP;
+  // Scrolling up makes the text bigger.
+  setFontSize(state.fontSize - steps);
 }
 
 // --- Wiring ------------------------------------------------------------------------------------
