@@ -7,8 +7,12 @@ import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type { EffortLevel, PermissionMode } from '@anthropic-ai/claude-agent-sdk';
+import { HOST_PROTOCOL } from '../shared/types';
 import type {
   AgentSession,
+  ChatAnswer,
+  ChatImage,
   AppSession,
   AppState,
   BackgroundTask,
@@ -25,6 +29,26 @@ import type {
   TranscriptSession,
   WorktreeResult,
 } from '../shared/types';
+import {
+  answerChat,
+  appendChat,
+  chatHistory,
+  chatModels,
+  chatTitle,
+  configureHost,
+  detachAllChats,
+  detachChat,
+  interruptChat,
+  liveChats,
+  rewindChat,
+  sendChat,
+  setChatEffort,
+  setChatMode,
+  setChatModel,
+  startChat,
+  stopChat,
+  stopChatTask,
+} from './chat';
 import { loadNotifyPrefs, notify, notifyPrefs, setNotifyPref } from './notifier';
 
 if (process.env.LISZT_USER_DATA) app.setPath('userData', process.env.LISZT_USER_DATA);
@@ -303,14 +327,19 @@ ipcMain.handle('projects:incubator', () => {
 });
 
 // --- Terminals ---------------------------------------------------------------------------------
-// A Claude pane runs a Claude Code background session: `claude --bg` starts it on Claude Code's
-// background server and the pane's terminal runs `claude attach` on it. Quitting Liszt ends only the
-// attach, so the session keeps working, and the pane attaches to it again on the next start. Where
-// no background session can start (Claude Code refuses folders it does not trust yet) the pane runs
-// claude itself, which asks about trust and ends with the app.
+// A shell pane runs the login shell in a pty. A Claude pane is a chat by default: its session runs
+// in Liszt's session host (see chat.ts), so it keeps working after Liszt quits and is attached to
+// again on the next start. Switched to the terminal, it runs a Claude Code background session
+// instead: `claude --bg` starts it on Claude Code's background server and the pane's terminal runs
+// `claude attach` on it, which also outlives Liszt. Only one of them runs the session at a time, so
+// switching stops the one and resumes the conversation in the other. Where no background session
+// can start (Claude Code refuses folders it does not trust yet) the terminal runs claude itself,
+// which asks about trust and ends with the app.
 
 const ANSI = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g;
 const BACKGROUNDED = /backgrounded\W+([0-9a-f]{8})\b/;
+/** A chat asked to take over a background session that is still working. */
+const BUSY_IN_BACKGROUND = 'busy-in-background';
 // Pane ids are written into hook commands.
 const PANE_ID = /^[\w-]+$/;
 
@@ -353,6 +382,12 @@ async function startBackground(o: SpawnOptions, resume: boolean, sessionId: stri
   return { bgId, sessionId: id ?? sessionId };
 }
 
+/** Stops the background session a pane ran in the terminal, so the chat can resume its conversation. */
+async function releaseBackground(sessionId: string, bgId?: string) {
+  const jobs = (await listAgents())?.filter((a) => a.kind === 'background' && a.id && !a.ended && (a.sessionId === sessionId || a.id === bgId));
+  for (const job of jobs ?? []) await runClaude(['stop', job.id!]).catch(() => {});
+}
+
 ipcMain.handle('pty:spawn', async (_e, o: SpawnOptions): Promise<SpawnResult> => {
   if (!PANE_ID.test(o.paneId)) return { ok: false, error: `Not a pane id: ${o.paneId}` };
   const seq = nextSpawn(o.paneId);
@@ -362,6 +397,8 @@ ipcMain.handle('pty:spawn', async (_e, o: SpawnOptions): Promise<SpawnResult> =>
   const old = ptys.get(o.paneId);
   ptys.delete(o.paneId);
   old?.kill();
+  // A chat still running in the host is attached to again rather than started anew.
+  detachChat(o.paneId);
 
   const paneEnv: Record<string, string> = {
     ...env,
@@ -371,6 +408,39 @@ ipcMain.handle('pty:spawn', async (_e, o: SpawnOptions): Promise<SpawnResult> =>
   };
   paneEnv.LANG ||= 'en_US.UTF-8';
   const cwd = fs.existsSync(o.cwd) ? o.cwd : os.homedir();
+  let { resume, sessionId } = o;
+
+  if (o.kind === 'claude' && !o.terminal) {
+    if (resume && o.attach) {
+      // A background session still at work is left to it; the pane shows it in the terminal.
+      const job = (await listAgents())?.find((a) => a.kind === 'background' && a.id === o.attach && !a.ended);
+      if (job && job.status !== 'idle') return { ok: false, error: BUSY_IN_BACKGROUND };
+      await releaseBackground(sessionId, o.attach);
+    }
+    // Claude cleans up old transcripts; a resume of one that is gone fails, so start a new session instead.
+    if (resume && o.transcript && !fs.existsSync(o.transcript)) {
+      resume = false;
+      sessionId = randomUUID();
+    }
+    if (spawnSeq.get(o.paneId) !== seq) return { ok: false, error: 'The pane was closed or restarted while it started.' };
+    const started = await startChat(
+      {
+        paneId: o.paneId,
+        cwd,
+        claude,
+        env: paneEnv,
+        settings: paneSettings(o),
+        sessionId,
+        resume,
+        prompt: resume ? undefined : o.prompt,
+        appendSystemPrompt: o.newProject && !resume ? newProjectPrompt(o.paneId) : undefined,
+        resumeAt: resume ? o.resumeAt : undefined,
+      },
+      send,
+    );
+    if (!started.ok) return started;
+    return { ok: true, sessionId: started.sessionId ?? sessionId, resumed: resume || started.attached, live: started };
+  }
 
   // A background session is attached while Claude Code still knows it, even done or stopped:
   // attach wakes it on the conversation it last had, whereas the listed session id is the one it
@@ -381,7 +451,6 @@ ipcMain.handle('pty:spawn', async (_e, o: SpawnOptions): Promise<SpawnResult> =>
       : undefined;
   // Claude cleans up old transcripts; resuming one that is gone lands in its session picker, so
   // start a new session instead.
-  let { resume, sessionId } = o;
   if (!bgId && resume && o.transcript && !fs.existsSync(o.transcript)) {
     resume = false;
     sessionId = randomUUID();
@@ -436,6 +505,77 @@ ipcMain.handle('pty:spawn', async (_e, o: SpawnOptions): Promise<SpawnResult> =>
   return { ok: true, sessionId, resumed: resume, bgId };
 });
 
+ipcMain.on('chat:send', (_e, id: string, text: string, images?: ChatImage[], uuid?: string) => sendChat(id, text, images, uuid));
+ipcMain.handle('chat:models', (_e, id: string) => chatModels(id));
+ipcMain.on('chat:model', (_e, id: string, model: string) => void setChatModel(id, model));
+ipcMain.on('chat:effort', (_e, id: string, effort: EffortLevel) => void setChatEffort(id, effort));
+ipcMain.on('chat:stop-task', (_e, id: string, taskId: string) => void stopChatTask(id, taskId));
+ipcMain.handle('chat:rewind', (_e, id: string, sessionId: string, cwd: string, index: number, files: boolean) => rewindChat(id, sessionId, cwd, index, files));
+ipcMain.handle('chat:bash', (_e, id: string, cwd: string, command: string) => runBash(id, cwd, command));
+ipcMain.handle('chat:files', (_e, cwd: string) => projectFiles(cwd));
+
+// --- `!` commands and `@` mentions --------------------------------------------------------------
+
+/** What a `!` command may print into the conversation; the rest is cut. */
+const BASH_KEEP = 30_000;
+
+/**
+ * Runs a `!` command in the pane's folder with the login shell's environment, as Claude Code's
+ * terminal UI does, and adds the command and its output to the conversation without a turn, so
+ * Claude sees them with the next prompt.
+ */
+async function runBash(paneId: string, cwd: string, command: string): Promise<{ stdout: string; stderr: string; code: number }> {
+  const { env } = await shellEnv;
+  const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolve) =>
+    execFile(env.SHELL || '/bin/zsh', ['-c', command], { cwd: fs.existsSync(cwd) ? cwd : os.homedir(), env, encoding: 'utf8', timeout: 120_000, maxBuffer: 8 << 20 }, (err, stdout, stderr) =>
+      resolve({ stdout: stdout ?? '', stderr: stderr || (err && !stdout ? err.message : ''), code: typeof err?.code === 'number' ? err.code : err ? 1 : 0 }),
+    ),
+  );
+  const cut = (s: string) => (s.length > BASH_KEEP ? `${s.slice(0, BASH_KEEP)}\n… (${s.length - BASH_KEEP} more characters)` : s);
+  appendChat(paneId, [
+    `<bash-input>${command}</bash-input>`,
+    `<bash-stdout>${cut(result.stdout.trimEnd())}</bash-stdout><bash-stderr>${cut(result.stderr.trimEnd())}</bash-stderr>`,
+  ]);
+  return result;
+}
+
+const fileLists = new Map<string, { at: number; files: Promise<string[]> }>();
+
+/** The files `@` offers: what git tracks or would, else a shallow walk; kept for half a minute. */
+function projectFiles(cwd: string): Promise<string[]> {
+  const cached = fileLists.get(cwd);
+  if (cached && Date.now() - cached.at < 30_000) return cached.files;
+  const files = new Promise<string[]>((resolve) =>
+    execFile('git', ['ls-files', '-co', '--exclude-standard'], { cwd, encoding: 'utf8', maxBuffer: 32 << 20 }, (err, out) => {
+      if (!err) return resolve(out.split('\n').filter(Boolean).slice(0, 50_000));
+      const found: string[] = [];
+      const walk = (dir: string, depth: number) => {
+        if (depth > 4 || found.length > 5000) return;
+        for (const d of fs.readdirSync(path.join(cwd, dir), { withFileTypes: true })) {
+          if (d.name.startsWith('.') || d.name === 'node_modules') continue;
+          const rel = dir ? `${dir}/${d.name}` : d.name;
+          if (d.isDirectory()) walk(rel, depth + 1);
+          else found.push(rel);
+        }
+      };
+      try {
+        walk('', 0);
+      } catch {
+        // An unreadable folder offers nothing.
+      }
+      resolve(found);
+    }),
+  );
+  fileLists.set(cwd, { at: Date.now(), files });
+  return files;
+}
+ipcMain.on('chat:answer', (_e, id: string, askId: string, a: ChatAnswer) => answerChat(id, askId, a));
+ipcMain.on('chat:interrupt', (_e, id: string) => void interruptChat(id));
+ipcMain.on('chat:mode', (_e, id: string, mode: PermissionMode) => void setChatMode(id, mode));
+ipcMain.handle('chat:history', (_e, sessionId: string, cwd: string) => chatHistory(sessionId, cwd));
+ipcMain.handle('chat:title', (_e, sessionId: string, cwd: string) => chatTitle(sessionId, cwd));
+ipcMain.handle('chat:live', () => liveChats());
+
 ipcMain.on('pty:write', (_e, id: string, data: string) => ptys.get(id)?.write(data));
 
 ipcMain.on('pty:resize', (_e, id: string, cols: number, rows: number) => {
@@ -448,6 +588,7 @@ ipcMain.on('pty:resize', (_e, id: string, cols: number, rows: number) => {
 
 ipcMain.on('pty:kill', (_e, id: string) => {
   nextSpawn(id);
+  stopChat(id);
   const p = ptys.get(id);
   ptys.delete(id);
   p?.kill();
@@ -1215,6 +1356,8 @@ function buildMenu() {
         { label: 'Smaller Text', accelerator: 'CmdOrCtrl+-', click: cmd('font-down') },
         { label: 'Actual Size', accelerator: 'CmdOrCtrl+0', click: cmd('font-reset') },
         { type: 'separator' },
+        { label: 'Switch Chat / Terminal', accelerator: 'CmdOrCtrl+E', click: cmd('toggle-view') },
+        { type: 'separator' },
         { role: 'toggleDevTools' },
       ],
     },
@@ -1309,15 +1452,19 @@ app.whenReady().then(() => {
   writeMoveScript();
   loadNotifyPrefs();
   hookUrl = startHookServer();
+  // A socket path must stay short (macOS allows 104 bytes), so it sits right in userData.
+  configureHost(path.join(userData(), `host-${HOST_PROTOCOL}.sock`), path.join(__dirname, 'host.js'));
   buildMenu();
   createWindow();
   setInterval(() => void pollAgents(), AGENTS_INTERVAL);
 });
 
-// Quitting ends the panes' terminals. A Claude pane's terminal only attaches to its background
-// session, which keeps working and is attached again on the next start; shells and panes that run
-// claude themselves end here. Hooks fired meanwhile find no address and send nothing.
+// Quitting ends the panes' terminals and lets go of the chats. A chat's session runs in the session
+// host and a terminal Claude pane only attaches to its background session, so both keep working
+// and are attached again on the next start; shells and panes that run claude themselves end here. Hooks fired meanwhile find no address and send nothing.
 app.on('before-quit', () => {
+  // The chats go on in the session host.
+  detachAllChats();
   for (const p of ptys.values()) p.kill();
   ptys.clear();
   fs.rmSync(hookUrlFile(), { force: true });

@@ -1,3 +1,5 @@
+import type { PermissionUpdate } from '@anthropic-ai/claude-agent-sdk';
+
 export type PaneKind = 'claude' | 'shell';
 
 export interface PaneState {
@@ -11,6 +13,14 @@ export interface PaneState {
   transcript?: string;
   /** Title set by the terminal (Claude names its task) or the first prompt. */
   title: string;
+  /** A Claude session shown in Claude Code's terminal UI rather than as a chat. */
+  terminal?: boolean;
+  /**
+   * The transcript entry a chat was rewound to. Claude Code forks the conversation there, but the
+   * transcript keeps the old turns as its latest until the next prompt, so until then the chat
+   * resumes and shows the conversation only up to here.
+   */
+  rewoundTo?: string;
   /** Title the user typed; wins over `title`. */
   customTitle?: string;
   /** Working directory when it is not the project folder (a task's worktree). */
@@ -166,13 +176,26 @@ export interface SpawnOptions {
   attach?: string;
   /** A new session started by New Project, which gets the instructions for moving to its project's folder. */
   newProject?: boolean;
+  /** Run a Claude session's own terminal UI instead of the chat. */
+  terminal?: boolean;
+  /** Resume a chat only up to this transcript entry: a rewind. */
+  resumeAt?: string;
 }
 
 /**
  * `sessionId` and `resumed` say what actually started, which differs when a resume was not possible.
  * `bgId` is the background session the pane attached to; without it the pane runs claude itself.
  */
-export type SpawnResult = { ok: true; sessionId: string; resumed: boolean; bgId?: string } | { ok: false; error: string };
+export type SpawnResult =
+  | {
+      ok: true;
+      sessionId: string;
+      resumed: boolean;
+      bgId?: string;
+      /** A chat attached to its session still running in the host, and how that session is. */
+      live?: { attached: boolean; busy: boolean; asking: boolean };
+    }
+  | { ok: false; error: string };
 
 /** A Claude Code session on this machine, as `claude agents --json` lists it. */
 export interface AgentSession {
@@ -285,3 +308,55 @@ export type WorktreeResult = { ok: true; dir: string; cwd: string; branch: strin
 export type MoveResult = { ok: true; transcript: string } | { ok: false; error: string };
 
 export type GitResult = { ok: true } | { ok: false; error: string };
+
+/** An image pasted or dropped into a chat message. */
+export interface ChatImage {
+  mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
+  /** Base64, without a data: prefix. */
+  data: string;
+}
+
+/** Claude Code asking a chat pane whether a tool may run; AskUserQuestion and ExitPlanMode come this way too. */
+export interface ChatAsk {
+  id: string;
+  tool: string;
+  input: Record<string, unknown>;
+  /** Rules that would stop the same call from asking again. */
+  suggestions?: PermissionUpdate[];
+  reason?: string;
+  toolUseId?: string;
+}
+
+export interface ChatAnswer {
+  allow: boolean;
+  /** The tool's input as it should run: the asked one, or with the user's answers filled in. */
+  input?: Record<string, unknown>;
+  permissions?: PermissionUpdate[];
+  message?: string;
+  /** Stop the turn rather than let Claude try something else. */
+  interrupt?: boolean;
+}
+
+/** A message of a session's transcript, as the Agent SDK reads it back. */
+export interface ChatMessage {
+  type: string;
+  uuid?: string;
+  message: unknown;
+  parent_tool_use_id: string | null;
+}
+
+/** Bumped when Liszt and its session host stop understanding each other; each version has its own socket. */
+export const HOST_PROTOCOL = 1;
+
+/** A chat session the session host runs, as its `list` reports it. */
+export interface HostSession {
+  /** The pane it belongs to. */
+  id: string;
+  pid: number;
+  sessionId?: string;
+  busy: boolean;
+  /** Stopped on a permission prompt or a question nobody has answered yet. */
+  asking: boolean;
+  /** Liszt is connected to it. */
+  attached: boolean;
+}

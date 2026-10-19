@@ -11,6 +11,9 @@ import type {
   AppSession,
   AppState,
   BackgroundTask,
+  ChatAnswer,
+  ChatAsk,
+  ChatImage,
   GitInfo,
   GitResult,
   GroupColor,
@@ -29,6 +32,7 @@ import type {
   TaskStatus,
   TranscriptSession,
 } from '../shared/types';
+import { ChatView } from './chat';
 import { h, iconEl } from './dom';
 import { ICONS, KIND_GLYPH } from './icons';
 import { leaf, panesIn, removePane, replacePane, splitPane, type Side } from './layout';
@@ -57,8 +61,17 @@ interface PaneView {
   chipEl: HTMLElement;
   actionsEl: HTMLElement;
   dropEl: HTMLElement;
-  term: Terminal;
-  fit: FitAddon;
+  /** The pane's terminal, made the first time it shows one. */
+  term?: Terminal;
+  fit?: FitAddon;
+  termHost: HTMLElement;
+  /** A Claude pane's conversation. */
+  chat?: ChatView;
+  /** Running `claude attach` on a background session rather than claude itself. */
+  attached: boolean;
+  /** The model a chat runs and the effort it was given in Liszt, for the model menu. */
+  model?: string;
+  effort?: string;
   status: Status;
   since: number;
   spawned: boolean;
@@ -67,8 +80,6 @@ interface PaneView {
   activity: string;
   /** Tool calls in the current turn. */
   actions: number;
-  /** Running `claude attach` on a background session rather than claude itself. */
-  attached: boolean;
   /** A hook arrived since the last spawn, so hooks drive the status. */
   hooked: boolean;
   /** Running only because Claude Code listed the session busy, with no hook since: the activity before (see catchTurn). */
@@ -277,7 +288,9 @@ function createView(project: ProjectState, pane: PaneState): PaneView {
     branch.title = pane.cwd ?? '';
     head.append(branch);
   }
-  head.append(chipEl, actionsEl, unsplitBtn, closeBtn);
+  const viewBtn = iconEl(ICONS.shell, 'icon view-switch');
+  if (pane.kind === 'claude') head.append(chipEl, actionsEl, viewBtn, unsplitBtn, closeBtn);
+  else head.append(chipEl, actionsEl, unsplitBtn, closeBtn);
   const body = h('div', 'pane-body');
   const host = h('div', 'term-host');
   body.append(host);
@@ -286,28 +299,30 @@ function createView(project: ProjectState, pane: PaneState): PaneView {
   el.append(head, body, dropEl);
   poolEl.append(el);
 
-  const term = new Terminal({
-    fontFamily: FONT,
-    fontSize: state.fontSize,
-    lineHeight: 1.15,
-    cursorBlink: true,
-    allowProposedApi: true,
-    scrollback: 10000,
-    macOptionClickForcesSelection: true,
-    theme: THEME,
-  });
-  const fit = new FitAddon();
-  term.loadAddon(fit);
-  term.loadAddon(new Unicode11Addon());
-  term.unicode.activeVersion = '11';
-  term.loadAddon(new WebLinksAddon((_e, uri) => api.openExternal(uri)));
-  term.open(host);
-  try {
-    const gl = new WebglAddon();
-    gl.onContextLoss(() => gl.dispose());
-    term.loadAddon(gl);
-  } catch {
-    // No WebGL: xterm keeps its DOM renderer.
+  let chat: ChatView | undefined;
+  if (pane.kind === 'claude') {
+    chat = new ChatView({
+      send: (text, images, uuid) => sendChat(v, text, images, uuid),
+      bash: async (command) => ((await ensureChat(v)) ? api.chatBash(pane.id, pane.cwd ?? project.path, command) : { stdout: '', stderr: 'The session is not running.', code: 1 }),
+      files: () => api.chatFiles(pane.cwd ?? project.path),
+      pickModel: (anchor) => void pickModel(v, anchor),
+      stopTask: (taskId) => api.chatStopTask(pane.id, taskId),
+      rewind: (index, text) => void rewindTo(v, index, text),
+      answer: (id, a) => answerAsk(v, id, a),
+      interrupt: () => api.chatInterrupt(pane.id),
+      setMode: (mode) => api.chatMode(pane.id, mode),
+      openExternal: (url) => api.openExternal(url),
+      key: () => false,
+      wheel: (e) => {
+        if (!e.metaKey) return false;
+        zoomByWheel(e);
+        return true;
+      },
+    });
+    chat.el.style.setProperty('--chat-size', `${state.fontSize + 1}px`);
+    const chatHost = h('div', 'chat-host');
+    chatHost.append(chat.el);
+    body.append(chatHost);
   }
 
   const v: PaneView = {
@@ -318,52 +333,30 @@ function createView(project: ProjectState, pane: PaneState): PaneView {
     chipEl,
     actionsEl,
     dropEl,
-    term,
-    fit,
+    termHost: host,
+    chat,
     status: 'starting',
     since: 0,
     spawned: false,
     exitCode: null,
     activity: '',
     actions: 0,
-    attached: false,
     hooked: false,
+    attached: false,
   };
   views.set(pane.id, v);
 
-  term.onData((data) => api.write(pane.id, data));
-  // Typing into a session reads it. What else the terminal sends does not: focus and mouse reports,
-  // and its answers to the queries claude makes on starting or attaching.
-  term.textarea?.addEventListener('keydown', () => setUnread(v, false));
-  // Claude names the task it is working on in the terminal title ("✳ Fix login crash").
-  term.onTitleChange((raw) => {
-    const clean = raw.replace(/^[^\p{L}\p{N}]+/u, '').trim();
-    if (!clean || clean === pane.title || /^claude( code)?$/i.test(clean)) return;
-    pane.title = clean;
-    // The name Claude was asked for replaces the one typed in Liszt.
-    if (v.renaming && Date.now() - v.renaming < RENAME_WAIT) {
-      v.renaming = undefined;
-      pane.customTitle = undefined;
-      renderSessions();
-    }
-    renderTitle(v);
-    save();
-  });
-  term.attachCustomKeyEventHandler((e) => handleKey(v, e));
-  // Cmd+scroll sizes the text like Cmd+= and Cmd+- instead of scrolling the terminal.
-  term.attachCustomWheelEventHandler((e) => {
-    if (!e.metaKey) return true;
-    e.preventDefault();
-    zoomByWheel(e);
-    return false;
-  });
-  term.textarea?.addEventListener('focus', () => setFocused(v));
+  if (inTerminal(v)) ensureTerminal(v);
+  paintView(v);
+  chat?.el.addEventListener('focusin', () => setFocused(v));
+  chat?.el.addEventListener('keydown', () => setUnread(v, false));
   el.addEventListener('mousedown', (e) => {
     setFocused(v);
     // A right-click opens the menu that can mark the session unread, so only a left click reads it.
     if (e.button === 0) setUnread(v, false);
   });
   closeBtn.addEventListener('click', () => closePane(v));
+  viewBtn.addEventListener('click', () => switchView(v));
   unsplitBtn.addEventListener('click', () => unsplitPane(v));
   titleEl.addEventListener('dblclick', () => editTitle(v));
   head.addEventListener('contextmenu', (e) => {
@@ -393,27 +386,130 @@ function createView(project: ProjectState, pane: PaneState): PaneView {
   return v;
 }
 
+/** A pane shows a terminal: every shell, and a Claude session switched to Claude Code's own UI. */
+const inTerminal = (v: PaneView) => v.pane.kind === 'shell' || Boolean(v.pane.terminal);
+
+/** Makes a pane's terminal the first time it shows one. */
+function ensureTerminal(v: PaneView): Terminal {
+  if (v.term) return v.term;
+  const { pane } = v;
+  const term = new Terminal({
+    fontFamily: FONT,
+    fontSize: state.fontSize,
+    lineHeight: 1.15,
+    cursorBlink: true,
+    allowProposedApi: true,
+    scrollback: 10000,
+    macOptionClickForcesSelection: true,
+    theme: THEME,
+  });
+  const fit = new FitAddon();
+  term.loadAddon(fit);
+  term.loadAddon(new Unicode11Addon());
+  term.unicode.activeVersion = '11';
+  term.loadAddon(new WebLinksAddon((_e, uri) => api.openExternal(uri)));
+  term.open(v.termHost);
+  try {
+    const gl = new WebglAddon();
+    gl.onContextLoss(() => gl.dispose());
+    term.loadAddon(gl);
+  } catch {
+    // No WebGL: xterm keeps its DOM renderer.
+  }
+  v.term = term;
+  v.fit = fit;
+
+  term.onData((data) => api.write(pane.id, data));
+  // Typing into a session reads it. What else the terminal sends does not: focus and mouse reports,
+  // and its answers to the queries claude makes on starting.
+  term.textarea?.addEventListener('keydown', () => setUnread(v, false));
+  // Claude names the task it is working on in the terminal title ("✳ Fix login crash"); a shell
+  // names itself.
+  term.onTitleChange((raw) => {
+    const clean = pane.kind === 'claude' ? raw.replace(/^[^\p{L}\p{N}]+/u, '').trim() : raw.trim();
+    if (!clean || clean === pane.title || (pane.kind === 'claude' && /^claude( code)?$/i.test(clean))) return;
+    pane.title = clean;
+    // The name Claude was asked for replaces the one typed in Liszt.
+    if (v.renaming && Date.now() - v.renaming < RENAME_WAIT) {
+      v.renaming = undefined;
+      pane.customTitle = undefined;
+      renderSessions();
+    }
+    renderTitle(v);
+    save();
+  });
+  term.attachCustomKeyEventHandler((e) => handleKey(v, e));
+  // Cmd+scroll sizes the text like Cmd+= and Cmd+- instead of scrolling the terminal.
+  term.attachCustomWheelEventHandler((e) => {
+    if (!e.metaKey) return true;
+    e.preventDefault();
+    zoomByWheel(e);
+    return false;
+  });
+  term.textarea?.addEventListener('focus', () => setFocused(v));
+  return term;
+}
+
+/** Shows the pane's chat or its terminal, and the button that switches between them. */
+function paintView(v: PaneView) {
+  const terminal = inTerminal(v);
+  v.el.classList.toggle('as-terminal', terminal);
+  const btn = v.el.querySelector<HTMLElement>('.view-switch');
+  if (btn) {
+    btn.innerHTML = terminal ? ICONS.chat : ICONS.shell;
+    btn.title = terminal ? 'Show as chat (⌘E)' : 'Show in the terminal (⌘E)';
+  }
+  if (terminal) scheduleFit(v);
+}
+
+/**
+ * Moves a Claude session between the chat and Claude Code's terminal UI. Only one of them can run
+ * the session, so the one showing stops and the other resumes the same conversation.
+ */
+function switchView(v: PaneView) {
+  if (v.pane.kind !== 'claude') return;
+  const to = v.pane.terminal ? 'chat' : 'terminal';
+  if (isWorking(v) && !confirm(`"${displayTitle(v)}" is still working. Switching stops its turn and the session goes on in the ${to}. Switch?`)) return;
+  v.pane.terminal = !v.pane.terminal || undefined;
+  // The terminal gets a background session of its own, resumed from where the chat left off; one
+  // the pane had before stopped when it went to the chat.
+  if (v.pane.terminal) v.pane.bgId = undefined;
+  save();
+  if (v.pane.terminal) ensureTerminal(v).reset();
+  paintView(v);
+  if (v.spawned) {
+    api.kill(v.pane.id);
+    void spawn(v, continues(v.pane));
+  }
+  focusView(v);
+}
+
 function scheduleFit(v: PaneView) {
+  if (!v.term || !v.fit) return;
+  const { term, fit } = v;
   requestAnimationFrame(() => {
     // Background tabs and hidden projects measure as zero; they fit again once shown.
     if (!v.el.isConnected || v.el.offsetParent === null) return;
     try {
-      v.fit.fit();
+      fit.fit();
     } catch {
       return;
     }
-    if (v.spawned) api.resize(v.pane.id, v.term.cols, v.term.rows);
+    if (v.spawned) api.resize(v.pane.id, term.cols, term.rows);
   });
 }
 
-/** A Claude pane that has a session goes on with it: attached while it is a background session, resumed otherwise. */
+/** Gives the keyboard to a pane: its composer or its terminal. */
+const focusView = (v: PaneView) => (inTerminal(v) ? v.term?.focus() : v.chat?.focus());
+
+/** A Claude pane that has a session goes on with it, resumed by id. */
 const continues = (pane: PaneState) => pane.kind === 'claude' && (pane.started || Boolean(pane.bgId));
 
-async function spawn(v: PaneView, resume: boolean, prompt?: string) {
+async function spawn(v: PaneView, resume: boolean, prompt?: string, resumeAt?: string) {
   // A session id is only reused for --resume; a fresh start always gets a new one so it never
   // collides with an id claude has already seen.
   if (v.pane.kind === 'claude' && !resume) {
-    // Left alone, the old background session would keep running with no pane.
+    // Left alone, a background session an earlier version started would keep running with no pane.
     if (v.pane.bgId) api.stopBackground(v.pane.sessionId, v.pane.bgId);
     v.pane.sessionId = uuid();
     v.pane.started = false;
@@ -427,25 +523,43 @@ async function spawn(v: PaneView, resume: boolean, prompt?: string) {
   v.unannounced = undefined;
   setStatus(v, v.pane.kind === 'claude' ? 'starting' : 'idle');
   try {
-    v.fit.fit();
+    v.fit?.fit();
   } catch {
     // Not visible yet; the ResizeObserver resizes the pty once it is.
   }
+  const cwd = v.pane.cwd ?? v.project.path;
+  // The conversation so far is read while the session starts.
+  const chat = inTerminal(v) ? undefined : v.chat;
+  const history = chat && resume ? api.chatHistory(v.pane.sessionId, cwd) : null;
+  resumeAt ??= resume ? v.pane.rewoundTo : undefined;
+  chat?.clear();
+  if (chat && prompt && !resume) chat.sent(prompt);
   const res = await api.spawn({
     paneId: v.pane.id,
-    cwd: v.pane.cwd ?? v.project.path,
+    cwd,
     kind: v.pane.kind,
     sessionId: v.pane.sessionId,
     resume,
-    cols: v.term.cols,
-    rows: v.term.rows,
+    cols: v.term?.cols ?? 80,
+    rows: v.term?.rows ?? 24,
     prompt,
     transcript: v.pane.transcript,
     attach: resume ? v.pane.bgId : undefined,
     newProject: v.pane.newProject,
+    terminal: v.pane.kind === 'claude' && inTerminal(v),
+    resumeAt,
   });
   // Closed while claude started.
   if (views.get(v.pane.id) !== v) return;
+  // The pane's background session is still working: it goes on in the terminal, and the user
+  // switches to the chat once it is done.
+  if (!res.ok && res.error === 'busy-in-background') {
+    v.pane.terminal = true;
+    save();
+    ensureTerminal(v);
+    paintView(v);
+    return spawn(v, resume, prompt);
+  }
   if (res.ok && v.pane.kind === 'claude') {
     if (resume && !res.resumed) {
       v.pane.started = false;
@@ -454,24 +568,45 @@ async function spawn(v: PaneView, resume: boolean, prompt?: string) {
     v.pane.sessionId = res.sessionId;
     v.pane.bgId = res.bgId;
     v.attached = Boolean(res.bgId);
+    if (res.live?.attached) v.pane.started = true;
     save();
+    if (history && res.resumed) {
+      const messages = await history;
+      if (views.get(v.pane.id) !== v || inTerminal(v)) return;
+      const cut = v.pane.rewoundTo ? messages.findIndex((m) => m.uuid === v.pane.rewoundTo) : -1;
+      chat?.history(cut >= 0 ? messages.slice(0, cut + 1) : messages);
+    }
+    // A chat that kept running in the session host sends no SessionStart; it is as the host says.
+    if (res.live?.attached && v.status === 'starting') {
+      if (res.live.busy) {
+        v.activity = 'Working';
+        setStatus(v, 'running');
+        chat?.setBusy(true);
+      } else if (v.pane.working) {
+        // It finished while Liszt was closed.
+        v.activity = 'Finished';
+        finishTurn(v);
+      } else setStatus(v, 'idle');
+    }
     syncAttached(v);
   }
   if (!res.ok) {
-    v.term.writeln(`\r\n\x1b[31mCould not start: ${res.error}\x1b[0m`);
+    if (chat) chat.error(`Could not start: ${res.error}`);
+    else v.term?.writeln(`\r\n\x1b[31mCould not start: ${res.error}\x1b[0m`);
     v.exitCode = -1;
     setStatus(v, 'exited');
   }
 }
 
 function restart(v: PaneView, resume: boolean) {
-  v.term.reset();
+  v.term?.reset();
+  v.chat?.clear();
   if (!resume) {
     v.pane.title = '';
     renderTitle(v);
   }
   void spawn(v, resume);
-  v.term.focus();
+  focusView(v);
 }
 
 function setStatus(v: PaneView, status: Status, keepSince = false) {
@@ -614,7 +749,8 @@ function editText(el: HTMLElement, text: string, onEnd: (text: string | null) =>
       e.preventDefault();
       finish(e.key === 'Enter');
       // Clicking away leaves focus where it went; the keyboard hands it back to the terminal.
-      if (focusedPaneId) views.get(focusedPaneId)?.term.focus();
+      const back = focusedPaneId ? views.get(focusedPaneId) : undefined;
+      if (back) focusView(back);
     },
     { signal: done.signal },
   );
@@ -645,6 +781,21 @@ function renameTab(v: PaneView) {
 /** Claude Code takes typed commands while its turn is over, background tasks or not. */
 const atPrompt = (v: PaneView) => v.pane.kind === 'claude' && v.pane.started && v.spawned && (v.status === 'idle' || v.status === 'waiting');
 
+/** How long the name asked of Claude may take to arrive; the model makes it up. */
+const RENAME_WAIT = 60_000;
+
+/**
+ * Has Claude Code name the session the way `/rename` with no name does: it asks the model for a
+ * short name and keeps it as the session's name, which the pane takes up in place of a name typed
+ * in Liszt once the command's turn ends. The model can come back without one, and then nothing
+ * changes.
+ */
+function renameWithClaude(v: PaneView) {
+  if (inTerminal(v) && v.term) return void renameInTerminal(v, v.term);
+  v.renaming = Date.now();
+  sendChat(v, '/rename', []);
+}
+
 /** A rule of Claude Code's prompt box; the top one carries the session's name once it has one. */
 const RULE = /^\s*─{4,}(?:.*─)?\s*$/;
 
@@ -674,18 +825,14 @@ function promptBox(term: Terminal): { draft: string; stashed: boolean } | null {
   return null;
 }
 
-/** How long the name asked of Claude may take to arrive; the model makes it up. */
-const RENAME_WAIT = 60_000;
-
 /**
- * Has Claude Code name the session the way `/rename` with no name does: it asks the model for a
- * short name, keeps it as the session's name and sets it as the terminal title, which the pane
- * takes up in place of a name typed in Liszt. The model can come back without one, and then
- * nothing changes. The command is typed into the prompt box, so a draft there is first put aside
+ * Rename with Claude in the terminal UI: Claude Code sets the name it gets as the terminal title,
+ * which the pane takes up in place of a name typed in Liszt. The model can come back without one,
+ * and then nothing changes. The command is typed into the prompt box, so a draft there is first put aside
  * with Ctrl+S, and Claude Code brings it back once the command has run.
  */
-async function renameWithClaude(v: PaneView) {
-  const box = promptBox(v.term);
+async function renameInTerminal(v: PaneView, term: Terminal) {
+  const box = promptBox(term);
   if (!box) return alert(`"${displayTitle(v)}" is not at its prompt. Close what is open in it, then ask again.`);
   // Ctrl+S keeps one draft aside, so it would drop the one already there.
   if (box.draft && box.stashed) return alert(`"${displayTitle(v)}" has a draft in its prompt and another stashed with Ctrl+S. Send or clear the draft, then ask again.`);
@@ -716,6 +863,7 @@ async function sessionMenu(v: PaneView, from: 'tab' | 'head', at: MenuAnchor) {
     'separator',
     { label: 'Reveal in Finder', id: 'reveal', key: 'f' },
   );
+  if (v.pane.kind === 'claude') entries.push({ label: v.pane.terminal ? 'Show as Chat' : 'Show in Terminal', id: 'toggle-view', key: 'e' });
   if (v.pane.kind === 'claude') entries.push({ label: 'Copy Session ID', id: 'copy-id', key: 'i', enabled: v.pane.started });
   entries.push('separator', { label: 'Close Session', id: 'close', key: 'c' }, { label: 'Close Other Sessions', id: 'close-others', key: 'o', enabled: project.panes.length > 1 });
   const choice = await showMenu(entries, at);
@@ -741,6 +889,8 @@ async function sessionMenu(v: PaneView, from: 'tab' | 'head', at: MenuAnchor) {
       return unsplitPane(v);
     case 'reveal':
       return api.reveal(v.pane.cwd ?? project.path);
+    case 'toggle-view':
+      return switchView(v);
     case 'copy-id':
       return api.copy(v.pane.sessionId);
     case 'close':
@@ -773,7 +923,7 @@ function focusPane(id: string | undefined) {
   setFocused(v);
   // Going to a session reads it; merely focusing the window again does not.
   setUnread(v, false);
-  v.term.focus();
+  focusView(v);
 }
 
 // --- Layout ------------------------------------------------------------------------------------
@@ -817,7 +967,7 @@ function renderLayout(project: ProjectState) {
     const v = views.get(id);
     if (v) scheduleFit(v);
   }
-  if (hadFocus && focusedPaneId && visible.includes(focusedPaneId)) views.get(focusedPaneId)?.term.focus();
+  if (hadFocus && focusedPaneId && visible.includes(focusedPaneId)) views.get(focusedPaneId) && focusView(views.get(focusedPaneId)!);
   if (project.id === state.activeProjectId) paintSessionTabs();
 }
 
@@ -966,7 +1116,8 @@ function closePane(v: PaneView, { ask = true, stop = true } = {}): boolean {
   api.kill(v.pane.id);
   if (v.pane.kind === 'claude' && stop) api.stopBackground(v.pane.sessionId, v.pane.bgId);
   keepUnread(v.pane);
-  v.term.dispose();
+  v.term?.dispose();
+  v.chat?.exited('Closed');
   v.el.remove();
   views.delete(v.pane.id);
   project.panes = project.panes.filter((p) => p !== v.pane);
@@ -1715,7 +1866,7 @@ async function moveSession(v: PaneView) {
   const res = await api.moveSession(sessionId, bgId, dir);
   if (views.get(v.pane.id) !== v) return;
   if (!res.ok) {
-    v.term.writeln(`\r\n\x1b[31mCould not move the session to ${dir}: ${res.error}\x1b[0m`);
+    v.chat?.error(`Could not move the session to ${dir}: ${res.error}`);
     void spawn(v, true);
     return;
   }
@@ -1745,7 +1896,7 @@ function closeProject(project: ProjectState, { ask = true } = {}) {
     api.kill(pane.id);
     if (pane.kind === 'claude') api.stopBackground(pane.sessionId, pane.bgId);
     keepUnread(pane);
-    v.term.dispose();
+    v.term?.dispose();
     v.el.remove();
     views.delete(pane.id);
   }
@@ -2713,6 +2864,102 @@ function onAgents(list: AgentSession[], asked: number) {
   renderSessions();
 }
 
+// --- Chat --------------------------------------------------------------------------------------
+
+/** Starts a Claude pane's session again when it has ended; false when it would not start. */
+async function ensureChat(v: PaneView): Promise<boolean> {
+  if (!(v.spawned && v.status !== 'exited')) await spawn(v, continues(v.pane));
+  return views.get(v.pane.id) === v && v.status !== 'exited';
+}
+
+/** Sends a message to a Claude pane's session, starting it again first when it has ended. */
+function sendChat(v: PaneView, text: string, images: ChatImage[], uuid?: string) {
+  setUnread(v, false);
+  void ensureChat(v).then((ok) => ok && api.chatSend(v.pane.id, text, images, uuid));
+}
+
+/** The model menu under a chat's model button: the models the session offers, and the effort. */
+async function pickModel(v: PaneView, anchor: HTMLElement) {
+  const models = await api.chatModels(v.pane.id);
+  if (!models.length || views.get(v.pane.id) !== v) return;
+  const current = models.find((m) => m.value === v.model || m.resolvedModel === v.model);
+  const levels = current?.supportedEffortLevels ?? ['low', 'medium', 'high', 'xhigh', 'max'];
+  const entries: MenuEntry[] = models.map((m) => ({ label: m.displayName, id: `model:${m.value}`, checked: m === current }));
+  if (current?.supportsEffort !== false)
+    entries.push('separator', { label: 'Effort', submenu: levels.map((l) => ({ label: l, id: `effort:${l}`, checked: l === v.effort })) });
+  const choice = await showMenu(entries, anchor);
+  if (!choice || views.get(v.pane.id) !== v) return;
+  const [kind, value] = [choice.slice(0, choice.indexOf(':')), choice.slice(choice.indexOf(':') + 1)];
+  if (kind === 'model') {
+    api.chatModel(v.pane.id, value);
+    v.model = value;
+  } else {
+    api.chatEffort(v.pane.id, value as (typeof levels)[number]);
+    v.effort = value;
+  }
+  v.chat?.setModel(models.find((m) => m.value === v.model)?.displayName ?? v.model ?? '', v.effort);
+}
+
+/**
+ * Takes back the user's `index`th prompt: the session resumes from just before it, or starts over
+ * when it was the first, and its text returns to the composer. Claude's changes to files can go
+ * back too, from the checkpoints Claude Code keeps.
+ */
+async function rewindTo(v: PaneView, index: number, text: string) {
+  const r = v.el.getBoundingClientRect();
+  const choice = await showMenu(
+    [
+      { label: 'Rewind the Conversation', id: 'chat', key: 'c' },
+      { label: 'Rewind the Conversation and the Code', id: 'code', key: 'b' },
+    ],
+    { x: r.left + r.width / 2 - 140, y: r.top + r.height / 2 },
+  );
+  if (!choice || views.get(v.pane.id) !== v) return;
+  const res = await api.chatRewind(v.pane.id, v.pane.sessionId, v.pane.cwd ?? v.project.path, index, choice === 'code');
+  if (views.get(v.pane.id) !== v) return;
+  if (!res.ok) return v.chat?.error(`Could not rewind: ${res.error}`);
+  api.kill(v.pane.id);
+  v.pane.rewoundTo = res.resumeAt ?? undefined;
+  save();
+  await spawn(v, Boolean(res.resumeAt), undefined, res.resumeAt ?? undefined);
+  if (views.get(v.pane.id) === v) v.chat?.setDraft(res.text || text);
+}
+
+function answerAsk(v: PaneView, id: string, a: ChatAnswer) {
+  api.chatAnswer(v.pane.id, id, a);
+  if (v.status === 'attention') {
+    v.activity = a.allow ? 'Working' : 'Waiting for you';
+    setStatus(v, 'running', true);
+  }
+}
+
+/** Claude stopped to ask: a permission, a question or a plan to approve. */
+function onChatAsk(id: string, ask: ChatAsk) {
+  const v = views.get(id);
+  if (!v?.chat) return;
+  v.chat.ask(ask);
+  v.activity =
+    ask.tool === 'AskUserQuestion' ? 'Asking you a question' : ask.tool === 'ExitPlanMode' ? 'Has a plan for you to approve' : `Needs permission · ${ask.tool}`;
+  setStatus(v, 'attention', true);
+  notify(v, v.activity, 'attention');
+}
+
+/** A turn ended; a name asked for with Rename with Claude is in the session now. */
+function onChatTurnEnd(v: PaneView) {
+  if (!v.renaming) return;
+  const asked = v.renaming;
+  v.renaming = undefined;
+  if (Date.now() - asked > RENAME_WAIT) return;
+  void api.chatTitle(v.pane.sessionId, v.pane.cwd ?? v.project.path).then((title) => {
+    if (!title || views.get(v.pane.id) !== v) return;
+    v.pane.title = title;
+    v.pane.customTitle = undefined;
+    renderTitle(v);
+    renderSessions();
+    save();
+  });
+}
+
 // --- Claude hooks ------------------------------------------------------------------------------
 
 function notify(v: PaneView, body: string, kind: NotifyKind) {
@@ -2742,6 +2989,8 @@ function onHook(ev: HookEvent) {
       break;
     case 'UserPromptSubmit':
       v.pane.started = true;
+      // The new prompt makes the rewound conversation the transcript's latest.
+      v.pane.rewoundTo = undefined;
       if (TASK_NOTIFICATION.test(ev.prompt ?? '')) {
         // A background task finished and Claude takes it up: the same piece of work goes on.
         v.activity = TASK_SUMMARY.exec(ev.prompt!)?.[1].trim() || 'Background task finished';
@@ -2801,6 +3050,7 @@ function onHook(ev: HookEvent) {
     if (ev.event === 'UserPromptSubmit' && task.status === 'review') setTaskStatus(v.project, task, 'doing');
     if (ev.event === 'Stop' && !ev.tasks?.length && task.status === 'doing') setTaskStatus(v.project, task, 'review');
   }
+  v.chat?.setActivity(v.status === 'running' ? v.activity : '');
   save();
 }
 
@@ -2901,7 +3151,8 @@ function setTasksPanel(on: boolean) {
 function setFontSize(size: number) {
   state.fontSize = Math.min(24, Math.max(9, size));
   for (const v of views.values()) {
-    v.term.options.fontSize = state.fontSize;
+    if (v.term) v.term.options.fontSize = state.fontSize;
+    v.chat?.el.style.setProperty('--chat-size', `${state.fontSize + 1}px`);
     scheduleFit(v);
   }
   save();
@@ -2986,20 +3237,32 @@ function onMenu(command: string) {
       return setFontSize(state.fontSize - 1);
     case 'font-reset':
       return setFontSize(DEFAULT_FONT_SIZE);
+    case 'toggle-view':
+      if (focused) switchView(focused);
+      return;
   }
 }
 
-api.onData((id, data) => views.get(id)?.term.write(data));
+api.onData((id, data) => views.get(id)?.term?.write(data));
 api.onExit((id, code) => {
   const v = views.get(id);
   if (!v) return;
   v.exitCode = code;
   v.activity = code ? `Exited with code ${code}` : 'Exited';
   setStatus(v, 'exited');
-  v.term.write(`\r\n\x1b[90m[process exited${code ? ` with code ${code}` : ''}]\x1b[0m\r\n`);
+  if (!inTerminal(v)) v.chat?.exited(code ? `The session ended with code ${code}.` : 'The session ended.');
+  else v.term?.write(`\r\n\x1b[90m[process exited${code ? ` with code ${code}` : ''}]\x1b[0m\r\n`);
   const task = taskOf(v);
   if (task?.status === 'doing') setTaskStatus(v.project, task, 'review');
 });
+api.onChatEvent((id, m) => {
+  const v = views.get(id);
+  if (!v?.chat) return;
+  if (m.type === 'system' && m.subtype === 'init' && typeof m.model === 'string') v.model = m.model;
+  v.chat.event(m);
+  if (m.type === 'result') onChatTurnEnd(v);
+});
+api.onChatAsk(onChatAsk);
 api.onBackground((id, bgId) => {
   const v = views.get(id);
   if (!v) return;
@@ -3007,6 +3270,12 @@ api.onBackground((id, bgId) => {
   save();
   renderSessions();
 });
+api.onChatUnask((id, askId) => {
+  const v = views.get(id);
+  v?.chat?.unask(askId);
+  if (v?.status === 'attention') setStatus(v, 'running', true);
+});
+api.onChatError((id, text) => views.get(id)?.chat?.error(text));
 api.onHook(onHook);
 api.onAgents(onAgents);
 api.onAppSessions(onAppSessions);
@@ -3117,6 +3386,10 @@ async function boot() {
   }
   const active = activeProject() ?? state.projects[0] ?? null;
   activateProject(active?.id ?? null);
+  // Chats that kept running in the session host while Liszt was closed are attached to again in
+  // every project, so their status shows and their questions come back.
+  const live = new Set((await api.chatLive()).map((x) => x.id));
+  for (const v of views.values()) if (live.has(v.pane.id) && !v.spawned && !inTerminal(v)) void spawn(v, true);
   // Tasks in progress keep running in background projects too.
   for (const project of state.projects) {
     for (const task of project.tasks) {
