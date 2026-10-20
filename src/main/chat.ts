@@ -373,6 +373,20 @@ export function stopChat(paneId: string) {
   void ask({ op: 'kill', id: paneId });
 }
 
+/**
+ * Ends a pane's session and waits until its process is gone. Another claude that resumes the
+ * conversation while it still runs gets a copy of it under a new id, which has no transcript
+ * until its first prompt, so the conversation would seem lost.
+ */
+export async function endChat(paneId: string, timeout = 5000) {
+  detachChat(paneId);
+  if (!(await ask<{ ok: boolean }>({ op: 'kill', id: paneId }))?.ok) return;
+  for (const until = Date.now() + timeout; Date.now() < until; ) {
+    if (!(await liveChats()).some((x) => x.id === paneId)) return;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
 /** Liszt is quitting: every session goes on in the host. */
 export function detachAllChats() {
   for (const id of [...chats.keys()]) detachChat(id);

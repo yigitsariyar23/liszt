@@ -38,6 +38,7 @@ import {
   configureHost,
   detachAllChats,
   detachChat,
+  endChat,
   interruptChat,
   liveChats,
   rewindChat,
@@ -382,10 +383,18 @@ async function startBackground(o: SpawnOptions, resume: boolean, sessionId: stri
   return { bgId, sessionId: id ?? sessionId };
 }
 
-/** Stops the background session a pane ran in the terminal, so the chat can resume its conversation. */
+/**
+ * Stops the background session a pane ran in the terminal, so the chat can resume its conversation,
+ * and removes it; its transcript stays. Left stopped, it makes the next `claude --bg --resume` of
+ * the conversation start under a new session id that has no transcript until its first prompt,
+ * and the chat after that would find nothing to resume.
+ */
 async function releaseBackground(sessionId: string, bgId?: string) {
-  const jobs = (await listAgents())?.filter((a) => a.kind === 'background' && a.id && !a.ended && (a.sessionId === sessionId || a.id === bgId));
-  for (const job of jobs ?? []) await runClaude(['stop', job.id!]).catch(() => {});
+  const jobs = (await listAgents())?.filter((a) => a.kind === 'background' && a.id && (a.sessionId === sessionId || a.id === bgId));
+  for (const job of jobs ?? []) {
+    if (!job.ended) await runClaude(['stop', job.id!]).catch(() => {});
+    await runClaude(['rm', job.id!]).catch(() => {});
+  }
 }
 
 ipcMain.handle('pty:spawn', async (_e, o: SpawnOptions): Promise<SpawnResult> => {
@@ -458,6 +467,8 @@ ipcMain.handle('pty:spawn', async (_e, o: SpawnOptions): Promise<SpawnResult> =>
   // Started here, so stopped again if the pane goes away before it is attached.
   let started: string | undefined;
   if (o.kind === 'claude' && !bgId) {
+    // The chat the pane ran until now lets go of the conversation first.
+    await endChat(o.paneId);
     const bg = await startBackground(o, resume, sessionId, cwd);
     if (bg) ({ bgId, sessionId } = bg);
     started = bg?.bgId;
