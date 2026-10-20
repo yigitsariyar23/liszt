@@ -3288,6 +3288,7 @@ api.onFocusPane((id) => {
 });
 
 for (const [id, svg] of [
+  ['new-project', ICONS.newProject],
   ['new-claude', ICONS.claude],
   ['new-shell', ICONS.shell],
   ['toggle-sidebar', ICONS.branch],
@@ -3297,7 +3298,6 @@ for (const [id, svg] of [
   byId(id).innerHTML = svg;
 }
 byId('add-project').innerHTML = ICONS.plus;
-byId('new-project').insertAdjacentHTML('afterbegin', ICONS.plus);
 byId('new-project').addEventListener('click', () => void newProject());
 // ⌃N, as the menu shows it: taken before the terminal, where it would step through the prompt history.
 window.addEventListener(

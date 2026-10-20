@@ -440,14 +440,6 @@ body.resizing-row * {
   color: var(--text);
 }
 
-.tool.wide {
-  display: flex;
-  gap: 6px;
-  width: auto;
-  padding: 0 10px 0 8px;
-  font-size: 12px;
-}
-
 .tool.claude:hover {
   color: var(--accent);
 }
