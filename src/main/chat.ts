@@ -21,7 +21,7 @@ import type {
   SpawnOptions as SdkSpawn,
 } from '@anthropic-ai/claude-agent-sdk';
 import { promptText } from '../shared/prompts';
-import type { ChatAnswer, ChatAsk, ChatImage, ChatMessage, HostSession } from '../shared/types';
+import type { ChatAnswer, ChatAsk, ChatImage, ChatInfo, ChatMessage, HostSession, UsageLimit } from '../shared/types';
 import { hostClient, type HostClient } from './hostclient';
 /** Messages written to a session as the user sends them; the SDK reads them as its prompt stream. */
 class Inbox implements AsyncIterable<SDKUserMessage> {
@@ -259,6 +259,39 @@ export async function setChatEffort(paneId: string, effort: EffortLevel) {
 
 export async function stopChatTask(paneId: string, taskId: string) {
   await chats.get(paneId)?.q.stopTask(taskId).catch(() => {});
+}
+
+/** `claude-opus-5-5` as people say it: `Opus 5.5`. */
+function modelName(id: string): string {
+  const [family, ...version] = id.replace(/^claude-/, '').replace(/-\d{8}$/, '').split('-');
+  return [family.charAt(0).toUpperCase() + family.slice(1), version.join('.')].filter(Boolean).join(' ');
+}
+
+/** The model, effort, plan and plan usage of a pane's session, for its welcome card. */
+export async function chatInfo(paneId: string): Promise<ChatInfo | null> {
+  const q = chats.get(paneId)?.q;
+  if (!q) return null;
+  const [init, settings, usage] = await Promise.all([
+    q.initializationResult().catch(() => null),
+    // The settings the session runs with; the SDK answers it, though its types leave it out.
+    ((q as unknown as { getSettings?: () => Promise<{ applied?: { model?: string; effort?: string | null } }> }).getSettings?.() ?? Promise.resolve(null)).catch(() => null),
+    // Experimental in the SDK; the card goes without limits when it fails.
+    q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true }).catch(() => null),
+  ]);
+  const id = settings?.applied?.model;
+  const limits: UsageLimit[] = [];
+  for (const [window, w] of [
+    ['5h', usage?.rate_limits?.five_hour],
+    ['7d', usage?.rate_limits?.seven_day],
+  ] as const) {
+    if (typeof w?.utilization === 'number') limits.push({ window, used: w.utilization, resetsAt: w.resets_at ?? undefined });
+  }
+  return {
+    model: id ? (init?.models.find((m: ModelInfo) => m.value === id)?.displayName ?? modelName(id)) : undefined,
+    effort: settings?.applied?.effort ?? undefined,
+    plan: init?.account.subscriptionType,
+    limits,
+  };
 }
 
 /**

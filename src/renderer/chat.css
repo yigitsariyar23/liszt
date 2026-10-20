@@ -35,6 +35,7 @@
 }
 
 .chat-log {
+  position: relative;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -57,6 +58,154 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+/* --- Welcome card, while the conversation is empty --- */
+
+.chat-welcome {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  pointer-events: none;
+}
+
+.chat-welcome[hidden] {
+  display: none;
+}
+
+.welcome-card {
+  width: min(440px, 100%);
+  padding: 18px 20px 16px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel-2);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  pointer-events: auto;
+  animation: welcome-in 0.28s ease-out;
+}
+
+.chat-welcome.leaving .welcome-card {
+  animation: welcome-out 0.3s ease-in forwards;
+}
+
+@keyframes welcome-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+@keyframes welcome-out {
+  to {
+    opacity: 0;
+    transform: translateY(-14px) scale(0.97);
+    filter: blur(2px);
+  }
+}
+
+.welcome-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 14px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* The project's tab icon, drawn larger. */
+.welcome-head > .tab-img,
+.welcome-head > .tab-glyph {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+}
+
+.welcome-head > .tab-glyph svg {
+  width: 20px;
+  height: 20px;
+}
+
+.welcome-where {
+  min-width: 0;
+}
+
+.welcome-project {
+  font-size: 1.15em;
+  font-weight: 600;
+}
+
+.welcome-folder {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 11.5px var(--mono);
+  color: var(--muted);
+}
+
+.welcome-rows {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px 16px;
+  align-items: center;
+}
+
+.welcome-row {
+  display: contents;
+}
+
+.welcome-label {
+  font-size: 0.86em;
+  color: var(--muted);
+}
+
+.welcome-value {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.welcome-bar {
+  flex: 1;
+  max-width: 140px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--border-strong);
+  overflow: hidden;
+}
+
+.welcome-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--green);
+}
+
+.welcome-bar.mid .welcome-fill {
+  background: var(--yellow);
+}
+
+.welcome-bar.high .welcome-fill {
+  background: var(--red);
+}
+
+.welcome-pct {
+  font: 12px var(--mono);
+}
+
+.welcome-reset {
+  font-size: 0.82em;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.welcome-hint {
+  margin-top: 14px;
+  font-size: 0.82em;
+  color: var(--faint);
 }
 
 /* --- Messages --- */

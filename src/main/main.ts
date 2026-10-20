@@ -33,6 +33,7 @@ import {
   answerChat,
   appendChat,
   chatHistory,
+  chatInfo,
   chatModels,
   chatTitle,
   configureHost,
@@ -614,6 +615,7 @@ ipcMain.on('chat:mode', (_e, id: string, mode: PermissionMode) => void setChatMo
 ipcMain.handle('chat:history', (_e, sessionId: string, cwd: string) => chatHistory(sessionId, cwd));
 ipcMain.handle('chat:title', (_e, sessionId: string, cwd: string) => chatTitle(sessionId, cwd));
 ipcMain.handle('chat:live', () => liveChats());
+ipcMain.handle('chat:info', (_e, id: string) => chatInfo(id));
 
 ipcMain.handle('terms:list', () => listShells());
 ipcMain.handle('terms:stop', (_e, id: string, pgid: number) => stopJob(id, pgid));

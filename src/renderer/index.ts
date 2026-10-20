@@ -508,6 +508,18 @@ const focusView = (v: PaneView) => (inTerminal(v) ? v.term?.focus() : v.chat?.fo
 /** A Claude pane that has a session goes on with it, resumed by id. */
 const continues = (pane: PaneState) => pane.kind === 'claude' && (pane.started || Boolean(pane.bgId));
 
+/** A new chat's card: where it runs at once, and its model and plan usage once the session answers. */
+async function fillWelcome(v: PaneView) {
+  const chat = v.chat;
+  if (!chat) return;
+  const cwd = v.pane.cwd ?? v.project.path;
+  const base = { project: v.project.name, folder: cwd.replace(/^\/Users\/[^/]+/, '~'), branch: v.pane.branch };
+  chat.setWelcome({ ...base, icon: projectIcon(v.project) });
+  const [git, info] = await Promise.all([api.gitInfo(cwd).catch(() => null), api.chatInfo(v.pane.id).catch(() => null)]);
+  if (views.get(v.pane.id) !== v || v.chat !== chat) return;
+  chat.setWelcome({ ...base, branch: git?.branch ?? base.branch, icon: projectIcon(v.project), info });
+}
+
 async function spawn(v: PaneView, resume: boolean, prompt?: string, resumeAt?: string) {
   // A session id is only reused for --resume; a fresh start always gets a new one so it never
   // collides with an id claude has already seen.
@@ -592,6 +604,7 @@ async function spawn(v: PaneView, resume: boolean, prompt?: string, resumeAt?: s
       } else setStatus(v, 'idle');
     }
     syncAttached(v);
+    if (chat && !res.resumed) void fillWelcome(v);
   }
   if (!res.ok) {
     if (chat) chat.error(`Could not start: ${res.error}`);

@@ -382,3 +382,22 @@ export interface HostTerm {
   pid: number;
   jobs: TermJob[];
 }
+
+/** A plan usage window: how much of it is used, and when it starts over. */
+export interface UsageLimit {
+  /** `5h` or `7d`. */
+  window: string;
+  /** Percent used, 0 to 100. */
+  used: number;
+  resetsAt?: string;
+}
+
+/** What a new chat's welcome card shows about its session. */
+export interface ChatInfo {
+  /** The model's display name, `Opus 5.5`. */
+  model?: string;
+  effort?: string;
+  /** The claude.ai plan, `Claude Max`. */
+  plan?: string;
+  limits: UsageLimit[];
+}

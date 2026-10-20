@@ -11,7 +11,7 @@ import { Marked } from 'marked';
 import './chat.css';
 import type { PermissionMode, PermissionUpdate } from '@anthropic-ai/claude-agent-sdk';
 import { promptText } from '../shared/prompts';
-import type { ChatAnswer, ChatAsk, ChatImage } from '../shared/types';
+import type { ChatAnswer, ChatAsk, ChatImage, ChatInfo } from '../shared/types';
 import { h } from './dom';
 
 export interface ChatHost {
@@ -34,6 +34,15 @@ export interface ChatHost {
   key(e: KeyboardEvent): boolean;
   /** Cmd+scroll sizes the text; true when it did. */
   wheel(e: WheelEvent): boolean;
+}
+
+/** What a new chat's welcome card says: where the session runs, and with what. `info` comes once the session is up. */
+export interface Welcome {
+  icon: HTMLElement;
+  project: string;
+  folder: string;
+  branch?: string;
+  info?: ChatInfo | null;
 }
 
 type Block = { type: string; [k: string]: unknown };
@@ -236,9 +245,21 @@ function toolInputEl(name: string, input: Fields): HTMLElement | null {
   return json && json !== '{}' ? clipped(json, 'json', 8) : null;
 }
 
+/** When a usage window starts over: in so long when that is within a day, else the day and time. */
+function resetsAt(iso: string): string {
+  const ms = Date.parse(iso) - Date.now();
+  if (!(ms > 0)) return '';
+  const m = Math.ceil(ms / 60_000);
+  if (m < 60) return `resets in ${m}m`;
+  if (m < 24 * 60) return `resets in ${Math.floor(m / 60)}h ${m % 60}m`;
+  return `resets ${new Date(iso).toLocaleString('en-GB', { weekday: 'short', hour: '2-digit', minute: '2-digit' })}`;
+}
+
 export class ChatView {
   readonly el = h('div', 'chat');
   private log = h('div', 'chat-log');
+  /** Shown while the conversation is empty; it goes once the first message is in. */
+  private welcomeEl = h('div', 'chat-welcome');
   private thread = h('div', 'chat-thread');
   private asksEl = h('div', 'chat-asks');
   private working = h('div', 'chat-working');
@@ -283,7 +304,12 @@ export class ChatView {
   private timer = 0;
 
   constructor(private host: ChatHost) {
-    this.log.append(this.thread, this.working);
+    this.log.append(this.welcomeEl, this.thread, this.working);
+    this.welcomeEl.hidden = true;
+    // Whatever joins the conversation first (a prompt, a `!` command, a reply) takes the card away.
+    new MutationObserver(() => {
+      if (this.thread.childElementCount) this.dismissWelcome();
+    }).observe(this.thread, { childList: true });
     this.working.append(h('span', 'spark'), h('span', 'label', 'Working'), h('span', 'elapsed'));
 
     this.input.rows = 1;
@@ -339,6 +365,9 @@ export class ChatView {
 
   /** Empties the conversation, for a pane that starts a new session. */
   clear() {
+    // A new session gets its card again; a resumed one shows its conversation instead.
+    this.welcomeEl.hidden = true;
+    this.welcomeEl.classList.remove('leaving');
     this.thread.replaceChildren();
     this.asksEl.replaceChildren();
     this.tools.clear();
@@ -368,6 +397,54 @@ export class ChatView {
   setModel(model: string, effort?: string) {
     this.modelEl.textContent = `${model.replace(/^claude-/, '')}${effort ? ` · ${effort}` : ''}`;
     this.modelEl.hidden = !model;
+  }
+
+  /** Fills the card a new chat shows until its first message. */
+  setWelcome(w: Welcome) {
+    if (this.thread.childElementCount) return;
+    const card = h('div', 'welcome-card');
+    const head = h('div', 'welcome-head');
+    const where = h('div', 'welcome-where');
+    where.append(h('div', 'welcome-project', w.project), h('div', 'welcome-folder', `${w.folder}${w.branch ? ` · ⎇ ${w.branch}` : ''}`));
+    head.append(w.icon, where);
+    const rows = h('div', 'welcome-rows');
+    const row = (label: string, ...value: (HTMLElement | string)[]) => {
+      const r = h('div', 'welcome-row');
+      const v = h('div', 'welcome-value');
+      v.append(...value);
+      r.append(h('div', 'welcome-label', label), v);
+      rows.append(r);
+    };
+    const info = w.info;
+    // Before the session answers, the rows hold their places.
+    row('Model', info === undefined ? '…' : info?.model ? `${info.model}${info.effort ? ` · ${info.effort}` : ''}` : 'Default');
+    if (info?.plan) row('Plan', info.plan);
+    for (const limit of info?.limits ?? []) {
+      const used = Math.max(0, Math.min(100, Math.round(limit.used)));
+      const bar = h('div', `welcome-bar${used >= 90 ? ' high' : used >= 70 ? ' mid' : ''}`);
+      const fill = h('div', 'welcome-fill');
+      fill.style.width = `${used}%`;
+      bar.append(fill);
+      row(`${limit.window} limit`, bar, h('span', 'welcome-pct', `${used}%`), h('span', 'welcome-reset', limit.resetsAt ? resetsAt(limit.resetsAt) : ''));
+    }
+    card.append(head, rows, h('div', 'welcome-hint', 'Send a message to start · / commands · @ files · ! shell'));
+    this.welcomeEl.replaceChildren(card);
+    this.welcomeEl.classList.remove('leaving');
+    this.welcomeEl.hidden = false;
+  }
+
+  /** Takes the card away, fading it out unless it is not showing. */
+  private dismissWelcome() {
+    if (this.welcomeEl.hidden || this.welcomeEl.classList.contains('leaving')) return;
+    this.welcomeEl.classList.add('leaving');
+    const done = () => {
+      if (!this.welcomeEl.classList.contains('leaving')) return;
+      this.welcomeEl.hidden = true;
+      this.welcomeEl.classList.remove('leaving');
+    };
+    this.welcomeEl.addEventListener('animationend', done, { once: true });
+    // In case the animation never runs (a hidden pane).
+    setTimeout(done, 600);
   }
 
   // --- Messages --------------------------------------------------------------------------------
