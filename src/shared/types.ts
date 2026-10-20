@@ -360,3 +360,25 @@ export interface HostSession {
   /** Liszt is connected to it. */
   attached: boolean;
 }
+
+/** Bumped when Liszt and its terminal host stop understanding each other; each version has its own socket. */
+export const TERM_PROTOCOL = 1;
+
+/** A job a shell runs: one process group the shell started, `npm run dev` and the like. */
+export interface TermJob {
+  /** The job's process group, which is also its first process. */
+  pgid: number;
+  command: string;
+  /** Holds the terminal, rather than started with `&`. */
+  foreground: boolean;
+  /** When it started, in ms since the epoch. */
+  since: number;
+}
+
+/** A shell the terminal host runs, as its `list` reports it. */
+export interface HostTerm {
+  /** The pane it belongs to. */
+  id: string;
+  pid: number;
+  jobs: TermJob[];
+}

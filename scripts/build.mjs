@@ -17,6 +17,7 @@ await Promise.all([
     define: { 'import.meta.url': '__importMetaUrl' },
   }),
   build({ ...common, entryPoints: ['src/host/host.ts'], outfile: 'dist/host.js', platform: 'node', format: 'cjs' }),
+  build({ ...common, entryPoints: ['src/host/termhost.ts'], outfile: 'dist/termhost.js', platform: 'node', format: 'cjs', external: ['node-pty'] }),
   build({ ...common, entryPoints: ['src/main/preload.ts'], outfile: 'dist/preload.js', platform: 'node', format: 'cjs', external: ['electron'] }),
   build({ ...common, entryPoints: ['src/main/banner-preload.ts'], outfile: 'dist/banner-preload.js', platform: 'node', format: 'cjs', external: ['electron'] }),
   build({ ...common, entryPoints: ['src/renderer/index.ts'], outfile: 'dist/renderer.js', platform: 'browser', format: 'iife' }),

@@ -1333,6 +1333,101 @@ button.task-section-head:hover {
   color: var(--accent);
 }
 
+/* Jobs, under the tasks ---------------------------------------------------------------------- */
+
+#jobs {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  max-height: 40%;
+  border-top: 1px solid var(--border);
+}
+
+#jobs .side-head .muted {
+  font-weight: 400;
+  font-size: 10.5px;
+}
+
+#job-list {
+  overflow-y: auto;
+  padding-bottom: 8px;
+}
+
+.job {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 10px 4px;
+  padding: 6px 6px 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel-2);
+  cursor: pointer;
+}
+
+.job:hover {
+  border-color: var(--border-strong);
+}
+
+.job.stopping {
+  opacity: 0.5;
+}
+
+.job-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+}
+
+/* Started with `&`: running, but not holding its terminal. */
+.job.bg .job-dot {
+  background: transparent;
+  border: 1.5px solid var(--green);
+}
+
+.job-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.job-command,
+.job-where {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-where,
+.job-age {
+  font-size: 10.5px;
+}
+
+.job-age {
+  flex: none;
+}
+
+.job-stop {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  color: var(--muted);
+}
+
+.job-stop svg {
+  width: 13px;
+  height: 13px;
+}
+
+.job-stop:hover {
+  background: var(--border-strong);
+  color: var(--red);
+}
+
 /* Sessions panel ------------------------------------------------------------------------------- */
 
 .sessions-head {

@@ -18,6 +18,7 @@ import type {
   GitResult,
   GroupColor,
   HookEvent,
+  HostTerm,
   LayoutNode,
   NotifyKind,
   PaneKind,
@@ -165,6 +166,8 @@ const sidebarBtn = byId('toggle-sidebar');
 const sessionsBtn = byId('toggle-sessions');
 const tasksBtn = byId('toggle-tasks');
 const taskListEl = byId('task-list');
+const jobListEl = byId('job-list');
+const jobsCountEl = byId('jobs-count');
 const taskInput = byId<HTMLInputElement>('task-input');
 const tasksProjectEl = byId('tasks-project');
 const apOffBtn = byId('ap-off');
@@ -3064,6 +3067,50 @@ function waitingOn(tasks: BackgroundTask[]): string {
   return `Waiting on ${tasks[0].type === 'shell' ? 'shell' : 'background task'} · ${tasks[0].label}`;
 }
 
+// --- Jobs --------------------------------------------------------------------------------------
+// Under the tasks, what the shells in every project run: `npm run dev`, a watcher, a server. The
+// shells run in Liszt's terminal host, so these keep going while Liszt is closed.
+
+const JOBS_INTERVAL = 2000;
+let shells: HostTerm[] = [];
+
+/** A command as ps gives it, with every absolute path cut to its last part. */
+const shortCommand = (command: string) => command.replace(/(^|\s)\/(?:[^\s/]+\/)+([^\s/]+)/g, '$1$2');
+
+async function refreshJobs() {
+  if (!state.tasksPanel || document.hidden) return;
+  shells = await api.shells();
+  renderJobs();
+}
+
+function renderJobs() {
+  const rows: HTMLElement[] = [];
+  for (const shell of shells) {
+    const v = views.get(shell.id);
+    if (!v) continue;
+    for (const job of shell.jobs) {
+      const row = h('div', `job${job.foreground ? '' : ' bg'}`);
+      row.title = `${job.command}\n${v.pane.cwd ?? v.project.path}\n${job.foreground ? 'Holds the terminal' : 'Started with &'} · click to show its terminal`;
+      const text = h('div', 'job-text');
+      text.append(h('div', 'job-command', shortCommand(job.command)), h('div', 'job-where muted', `${v.project.name} · ${displayTitle(v)}`));
+      const stop = iconEl(ICONS.stop, 'job-stop');
+      stop.title = 'Stop (Ctrl+C)';
+      stop.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        row.classList.add('stopping');
+        await api.stopJob(shell.id, job.pgid);
+        await refreshJobs();
+      });
+      row.append(h('span', 'job-dot'), text, h('span', 'job-age muted', duration(Date.now() - job.since)), stop);
+      row.addEventListener('click', () => revealPane(v));
+      rows.push(row);
+    }
+  }
+  jobsCountEl.textContent = rows.length ? String(rows.length) : '';
+  if (!rows.length) rows.push(h('div', 'side-note', 'No jobs running in terminals.'));
+  jobListEl.replaceChildren(...rows);
+}
+
 // --- Git sidebar -------------------------------------------------------------------------------
 
 function codeClass(code: string): string {
@@ -3145,6 +3192,7 @@ function setTasksPanel(on: boolean) {
   state.tasksPanel = on;
   document.body.classList.toggle('no-tasks', !on);
   tasksBtn.classList.toggle('on', on);
+  if (on) void refreshJobs();
   save();
 }
 
@@ -3340,6 +3388,8 @@ taskInput.addEventListener('keydown', (e) => {
   taskInput.value = '';
 });
 window.addEventListener('focus', () => void refreshGit());
+window.addEventListener('focus', () => void refreshJobs());
+setInterval(() => void refreshJobs(), JOBS_INTERVAL);
 setInterval(() => void refreshGit(), 5000);
 setInterval(() => {
   for (const v of views.values()) {

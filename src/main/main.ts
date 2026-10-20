@@ -8,7 +8,7 @@ import * as http from 'node:http';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { EffortLevel, PermissionMode } from '@anthropic-ai/claude-agent-sdk';
-import { HOST_PROTOCOL } from '../shared/types';
+import { HOST_PROTOCOL, TERM_PROTOCOL } from '../shared/types';
 import type {
   AgentSession,
   ChatAnswer,
@@ -51,6 +51,7 @@ import {
   stopChatTask,
 } from './chat';
 import { loadNotifyPrefs, notify, notifyPrefs, setNotifyPref } from './notifier';
+import { configureTerms, listShells, openShell, stopJob, type Shell } from './terms';
 
 if (process.env.LISZT_USER_DATA) app.setPath('userData', process.env.LISZT_USER_DATA);
 if (!app.requestSingleInstanceLock()) app.quit();
@@ -60,6 +61,8 @@ const statePath = () => path.join(userData(), 'state.json');
 
 let win: BrowserWindow | null = null;
 const ptys = new Map<string, pty.IPty>();
+/** Shell panes' shells, which run in the terminal host. */
+const shells = new Map<string, Shell>();
 
 function send(channel: string, ...args: unknown[]) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, ...args);
@@ -328,7 +331,8 @@ ipcMain.handle('projects:incubator', () => {
 });
 
 // --- Terminals ---------------------------------------------------------------------------------
-// A shell pane runs the login shell in a pty. A Claude pane is a chat by default: its session runs
+// A shell pane runs the login shell in Liszt's terminal host (see terms.ts), so it outlives Liszt;
+// without the host it runs in a pty here. A Claude pane is a chat by default: its session runs
 // in Liszt's session host (see chat.ts), so it keeps working after Liszt quits and is attached to
 // again on the next start. Switched to the terminal, it runs a Claude Code background session
 // instead: `claude --bg` starts it on Claude Code's background server and the pane's terminal runs
@@ -406,6 +410,9 @@ ipcMain.handle('pty:spawn', async (_e, o: SpawnOptions): Promise<SpawnResult> =>
   const old = ptys.get(o.paneId);
   ptys.delete(o.paneId);
   old?.kill();
+  // A shell still running in the terminal host is attached to again below.
+  shells.get(o.paneId)?.detach();
+  shells.delete(o.paneId);
   // A chat still running in the host is attached to again rather than started anew.
   detachChat(o.paneId);
 
@@ -449,6 +456,27 @@ ipcMain.handle('pty:spawn', async (_e, o: SpawnOptions): Promise<SpawnResult> =>
     );
     if (!started.ok) return started;
     return { ok: true, sessionId: started.sessionId ?? sessionId, resumed: resume || started.attached, live: started };
+  }
+
+  if (o.kind === 'shell') {
+    const sh = await openShell(o.paneId, { file: env.SHELL || '/bin/zsh', args: ['-l'], cwd, env: paneEnv, cols: o.cols, rows: o.rows });
+    if (spawnSeq.get(o.paneId) !== seq) {
+      sh?.detach();
+      return { ok: false, error: 'The pane was closed or restarted while it started.' };
+    }
+    // Without the host the shell runs here, and ends with the app.
+    if (sh) {
+      shells.set(o.paneId, sh);
+      sh.onData((data) => {
+        if (shells.get(o.paneId) === sh) send('pty:data', o.paneId, data);
+      });
+      sh.onExit((code) => {
+        if (shells.get(o.paneId) !== sh) return;
+        shells.delete(o.paneId);
+        send('pty:exit', o.paneId, code ?? 1);
+      });
+      return { ok: true, sessionId, resumed: resume };
+    }
   }
 
   // A background session is attached while Claude Code still knows it, even done or stopped:
@@ -587,11 +615,14 @@ ipcMain.handle('chat:history', (_e, sessionId: string, cwd: string) => chatHisto
 ipcMain.handle('chat:title', (_e, sessionId: string, cwd: string) => chatTitle(sessionId, cwd));
 ipcMain.handle('chat:live', () => liveChats());
 
-ipcMain.on('pty:write', (_e, id: string, data: string) => ptys.get(id)?.write(data));
+ipcMain.handle('terms:list', () => listShells());
+ipcMain.handle('terms:stop', (_e, id: string, pgid: number) => stopJob(id, pgid));
+
+ipcMain.on('pty:write', (_e, id: string, data: string) => (shells.get(id) ?? ptys.get(id))?.write(data));
 
 ipcMain.on('pty:resize', (_e, id: string, cols: number, rows: number) => {
   try {
-    ptys.get(id)?.resize(Math.max(cols, 2), Math.max(rows, 1));
+    (shells.get(id) ?? ptys.get(id))?.resize(Math.max(cols, 2), Math.max(rows, 1));
   } catch {
     // The process may have exited between the renderer's measure and this call.
   }
@@ -600,6 +631,8 @@ ipcMain.on('pty:resize', (_e, id: string, cols: number, rows: number) => {
 ipcMain.on('pty:kill', (_e, id: string) => {
   nextSpawn(id);
   stopChat(id);
+  shells.get(id)?.kill();
+  shells.delete(id);
   const p = ptys.get(id);
   ptys.delete(id);
   p?.kill();
@@ -1467,19 +1500,24 @@ app.whenReady().then(() => {
   hookUrl = startHookServer();
   // A socket path must stay short (macOS allows 104 bytes), so it sits right in userData.
   configureHost(path.join(userData(), `host-${HOST_PROTOCOL}.sock`), path.join(__dirname, 'host.js'));
+  configureTerms(path.join(userData(), `term-${TERM_PROTOCOL}.sock`), path.join(__dirname, 'termhost.js'));
   buildMenu();
   createWindow();
   setInterval(() => void pollAgents(), AGENTS_INTERVAL);
 });
 
-// Quitting ends the panes' terminals and lets go of the chats. A chat's session runs in the session
-// host and a terminal Claude pane only attaches to its background session, so both keep working
-// and are attached again on the next start; shells and panes that run claude themselves end here. Hooks fired meanwhile find no address and send nothing.
+// Quitting ends the panes' terminals and lets go of the chats and shells. A chat's session runs in
+// the session host, a shell in the terminal host, and a terminal Claude pane only attaches to its
+// background session, so all of them keep working and are attached again on the next start; panes
+// that run claude themselves end here. Hooks fired meanwhile find no address and send nothing.
 app.on('before-quit', () => {
   // The chats go on in the session host.
   detachAllChats();
   for (const p of ptys.values()) p.kill();
   ptys.clear();
+  // The shells go on in the terminal host.
+  for (const sh of shells.values()) sh.detach();
+  shells.clear();
   fs.rmSync(hookUrlFile(), { force: true });
 });
 

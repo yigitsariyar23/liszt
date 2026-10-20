@@ -7,7 +7,6 @@
 // conversation, and permission prompts and questions come back through `canUseTool` to wait for the
 // user in the pane; one left unanswered when Liszt quit is asked again on attaching.
 
-import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import * as net from 'node:net';
 import { getSessionInfo, getSessionMessages, query } from '@anthropic-ai/claude-agent-sdk';
@@ -23,6 +22,7 @@ import type {
 } from '@anthropic-ai/claude-agent-sdk';
 import { promptText } from '../shared/prompts';
 import type { ChatAnswer, ChatAsk, ChatImage, ChatMessage, HostSession } from '../shared/types';
+import { hostClient, type HostClient } from './hostclient';
 /** Messages written to a session as the user sends them; the SDK reads them as its prompt stream. */
 class Inbox implements AsyncIterable<SDKUserMessage> {
   private queue: SDKUserMessage[] = [];
@@ -51,56 +51,15 @@ class Inbox implements AsyncIterable<SDKUserMessage> {
 
 // --- The session host ----------------------------------------------------------------------------
 
-let host = { sock: '', script: '' };
+let host: HostClient | null = null;
 
 /** Where the host listens and the script it runs; set once by main. */
 export function configureHost(sock: string, script: string) {
-  host = { sock, script };
+  host = hostClient(sock, script);
 }
 
-/** Sends the host one request and reads its one-line answer; null when no host answers. */
-function ask<T>(req: Record<string, unknown>, timeout = 3000): Promise<T | null> {
-  return new Promise((resolve) => {
-    const conn = net.createConnection(host.sock);
-    let out = '';
-    const done = (v: T | null) => {
-      conn.destroy();
-      resolve(v);
-    };
-    conn.setTimeout(timeout, () => done(null));
-    conn.on('error', () => done(null));
-    conn.on('data', (d) => (out += d.toString('utf8')));
-    conn.on('end', () => {
-      try {
-        done(JSON.parse(out));
-      } catch {
-        done(null);
-      }
-    });
-    conn.write(`${JSON.stringify(req)}\n`);
-  });
-}
-
-let starting: Promise<boolean> | null = null;
-
-/** Starts the host unless one is running. It outlives Liszt, so it is its own process group. */
-function ensureHost(): Promise<boolean> {
-  starting ??= (async () => {
-    if (await ask({ op: 'ping' })) return true;
-    const child = spawn(process.execPath, [host.script, host.sock], {
-      detached: true,
-      stdio: 'ignore',
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-    });
-    child.unref();
-    for (let i = 0; i < 50; i++) {
-      await new Promise((r) => setTimeout(r, 100));
-      if (await ask({ op: 'ping' }, 500)) return true;
-    }
-    return false;
-  })().finally(() => (starting = null));
-  return starting;
-}
+const ask = <T>(req: Record<string, unknown>, timeout?: number) => host!.ask<T>(req, timeout);
+const ensureHost = () => host!.ensure();
 
 /** The chat sessions the host runs, by pane; empty when there is no host. */
 export async function liveChats(): Promise<HostSession[]> {
@@ -112,7 +71,7 @@ export async function liveChats(): Promise<HostSession[]> {
  * stdout. Killing it only lets go of the socket; ending the session is `kill` to the host.
  */
 function hosted(req: Record<string, unknown>): SpawnedProcess & { conn: net.Socket } {
-  const conn = net.createConnection(host.sock);
+  const conn = net.createConnection(host!.sock);
   const events = new EventEmitter();
   let exitCode: number | null = null;
   conn.on('error', () => {});
