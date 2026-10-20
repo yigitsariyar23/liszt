@@ -37,6 +37,7 @@ const api = {
   chatSend: (id: string, text: string, images?: ChatImage[], uuid?: string) => ipcRenderer.send('chat:send', id, text, images, uuid),
   chatBash: (id: string, cwd: string, command: string): Promise<{ stdout: string; stderr: string; code: number }> =>
     ipcRenderer.invoke('chat:bash', id, cwd, command),
+  chatBashCancel: (id: string) => ipcRenderer.send('chat:bash-cancel', id),
   chatFiles: (cwd: string): Promise<string[]> => ipcRenderer.invoke('chat:files', cwd),
   chatModels: (id: string): Promise<ModelInfo[]> => ipcRenderer.invoke('chat:models', id),
   chatModel: (id: string, model: string) => ipcRenderer.send('chat:model', id, model),

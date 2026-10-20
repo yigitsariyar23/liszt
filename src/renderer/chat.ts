@@ -19,6 +19,10 @@ export interface ChatHost {
   send(text: string, images: ChatImage[], uuid: string): void;
   /** Runs a `!` command in the pane's folder; its input and output join the conversation. */
   bash(command: string): Promise<{ stdout: string; stderr: string; code: number }>;
+  /** Ends the `!` command the chat is running. */
+  cancelBash(): void;
+  /** Runs a command in a new terminal next to the chat, where it can keep going. */
+  toTerminal(command: string): void;
   /** The files `@` offers, relative to the pane's folder. */
   files(): Promise<string[]>;
   /** Opens the model and effort menu under the model button. */
@@ -678,7 +682,19 @@ export class ChatView {
   /** A `!` command, drawn as it starts; its output comes after. */
   private bashRun(command: string): HTMLElement {
     const el = h('div', 'bash-run running');
-    el.append(h('div', 'bash-cmd', `! ${command}`));
+    const head = h('div', 'bash-head');
+    // A command still running here stops, so the two do not run at once (a dev server's port).
+    const move = h('button', 'bash-move', 'Run in terminal');
+    move.title = 'Run this command in a new terminal next to the chat, where it keeps going after Liszt quits';
+    move.addEventListener('click', () => {
+      if (el.classList.contains('running') && this.lastBash === el) {
+        el.classList.add('moved');
+        this.host.cancelBash();
+      }
+      this.host.toTerminal(command);
+    });
+    head.append(move, h('div', 'bash-cmd', `! ${command}`));
+    el.append(head);
     this.thread.append(el);
     this.lastBash = el;
     return el;
@@ -686,6 +702,11 @@ export class ChatView {
 
   private bashOutput(el: HTMLElement, stdout: string, stderr: string, code = 0) {
     el.classList.remove('running');
+    if (el.classList.contains('moved')) {
+      el.append(h('div', 'bash-none', 'Moved to a terminal'));
+      if (stdout.trim()) el.append(clipped(stdout, 'out', 20));
+      return;
+    }
     el.classList.toggle('error', code !== 0 || (!stdout.trim() && Boolean(stderr.trim())));
     if (stdout.trim()) el.append(clipped(stdout, 'out', 20));
     if (stderr.trim()) el.append(clipped(stderr, 'out error', 10));

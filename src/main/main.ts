@@ -1,7 +1,7 @@
 import { BrowserWindow, Menu, app, clipboard, dialog, ipcMain, nativeImage, shell } from 'electron';
 import type { MenuItemConstructorOptions } from 'electron';
 import * as pty from 'node-pty';
-import { execFile } from 'node:child_process';
+import { execFile, type ChildProcess } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as http from 'node:http';
@@ -552,6 +552,7 @@ ipcMain.on('chat:effort', (_e, id: string, effort: EffortLevel) => void setChatE
 ipcMain.on('chat:stop-task', (_e, id: string, taskId: string) => void stopChatTask(id, taskId));
 ipcMain.handle('chat:rewind', (_e, id: string, sessionId: string, cwd: string, index: number, files: boolean) => rewindChat(id, sessionId, cwd, index, files));
 ipcMain.handle('chat:bash', (_e, id: string, cwd: string, command: string) => runBash(id, cwd, command));
+ipcMain.on('chat:bash-cancel', (_e, id: string) => cancelBash(id));
 ipcMain.handle('chat:files', (_e, cwd: string) => projectFiles(cwd));
 
 // --- `!` commands and `@` mentions --------------------------------------------------------------
@@ -566,17 +567,52 @@ const BASH_KEEP = 30_000;
  */
 async function runBash(paneId: string, cwd: string, command: string): Promise<{ stdout: string; stderr: string; code: number }> {
   const { env } = await shellEnv;
-  const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolve) =>
-    execFile(env.SHELL || '/bin/zsh', ['-c', command], { cwd: fs.existsSync(cwd) ? cwd : os.homedir(), env, encoding: 'utf8', timeout: 120_000, maxBuffer: 8 << 20 }, (err, stdout, stderr) =>
-      resolve({ stdout: stdout ?? '', stderr: stderr || (err && !stdout ? err.message : ''), code: typeof err?.code === 'number' ? err.code : err ? 1 : 0 }),
-    ),
-  );
+  const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolve) => {
+    const child = execFile(
+      env.SHELL || '/bin/zsh',
+      ['-c', command],
+      { cwd: fs.existsSync(cwd) ? cwd : os.homedir(), env, encoding: 'utf8', timeout: 120_000, maxBuffer: 8 << 20 },
+      (err, stdout, stderr) => {
+        if (bashRuns.get(paneId) === child) bashRuns.delete(paneId);
+        resolve({ stdout: stdout ?? '', stderr: stderr || (err && !stdout ? err.message : ''), code: typeof err?.code === 'number' ? err.code : err ? 1 : 0 });
+      },
+    );
+    child.stdin?.end();
+    bashRuns.set(paneId, child);
+  });
   const cut = (s: string) => (s.length > BASH_KEEP ? `${s.slice(0, BASH_KEEP)}\n… (${s.length - BASH_KEEP} more characters)` : s);
   appendChat(paneId, [
     `<bash-input>${command}</bash-input>`,
     `<bash-stdout>${cut(result.stdout.trimEnd())}</bash-stdout><bash-stderr>${cut(result.stderr.trimEnd())}</bash-stderr>`,
   ]);
   return result;
+}
+
+/** The `!` command each chat is running, so it can be moved to a terminal. */
+const bashRuns = new Map<string, ChildProcess>();
+
+/** Ends a chat's running `!` command and whatever it started (a dev server outlives its shell otherwise). */
+function cancelBash(paneId: string) {
+  const child = bashRuns.get(paneId);
+  if (!child?.pid) return;
+  bashRuns.delete(paneId);
+  const root = child.pid;
+  execFile('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8' }, (_err, out) => {
+    const children = new Map<number, number[]>();
+    for (const line of (out ?? '').split('\n')) {
+      const [pid, ppid] = line.trim().split(/\s+/).map(Number);
+      if (pid && ppid) children.set(ppid, [...(children.get(ppid) ?? []), pid]);
+    }
+    const tree = [root];
+    for (let i = 0; i < tree.length; i++) tree.push(...(children.get(tree[i]) ?? []));
+    for (const pid of tree.reverse()) {
+      try {
+        process.kill(pid, 'SIGTERM');
+      } catch {
+        // Already gone.
+      }
+    }
+  });
 }
 
 const fileLists = new Map<string, { at: number; files: Promise<string[]> }>();

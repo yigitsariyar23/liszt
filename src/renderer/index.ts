@@ -89,6 +89,9 @@ interface PaneView {
   renaming?: number;
   /** Folder Claude asked to move this New Project session to; it moves when the turn ends. */
   moveTo?: string;
+  /** A command the shell runs once it is up, typed in as if by hand. */
+  run?: string;
+  runTimer?: number;
 }
 
 interface PaneOptions {
@@ -109,6 +112,8 @@ interface PaneOptions {
   focus?: boolean;
   /** A New Project session, told how to move itself to its project's folder. */
   newProject?: boolean;
+  /** A command a new shell runs once it is up. */
+  run?: string;
 }
 
 const DEFAULT_FONT_SIZE = 13;
@@ -307,6 +312,8 @@ function createView(project: ProjectState, pane: PaneState): PaneView {
     chat = new ChatView({
       send: (text, images, uuid) => sendChat(v, text, images, uuid),
       bash: async (command) => ((await ensureChat(v)) ? api.chatBash(pane.id, pane.cwd ?? project.path, command) : { stdout: '', stderr: 'The session is not running.', code: 1 }),
+      cancelBash: () => api.chatBashCancel(pane.id),
+      toTerminal: (command) => void addPane('shell', v.project, { cwd: v.pane.cwd, split: 'right', run: command }),
       files: () => api.chatFiles(pane.cwd ?? project.path),
       pickModel: (anchor) => void pickModel(v, anchor),
       stopTask: (taskId) => api.chatStopTask(pane.id, taskId),
@@ -1100,6 +1107,7 @@ function addPane(kind: PaneKind, project = activeProject(), opts: PaneOptions = 
   const at = opts.taskId ? -1 : project.panes.findIndex((p) => p.id === project.activePaneId);
   project.panes.splice(at < 0 ? project.panes.length : at + 1, 0, pane);
   const v = createView(project, pane);
+  v.run = opts.run;
 
   const anchor = splitAnchor(project);
   if (opts.split && project.layout && anchor) {
@@ -3304,7 +3312,23 @@ function onMenu(command: string) {
   }
 }
 
-api.onData((id, data) => views.get(id)?.term?.write(data));
+/** How long a new shell's output stays quiet before it counts as at its prompt. */
+const PROMPT_QUIET = 200;
+
+api.onData((id, data) => {
+  const v = views.get(id);
+  v?.term?.write(data);
+  // A command waiting for the shell is typed once the shell has drawn its prompt; typed sooner, the
+  // terminal echoes it before the prompt as well.
+  if (v?.run) {
+    clearTimeout(v.runTimer);
+    v.runTimer = window.setTimeout(() => {
+      if (!v.run || views.get(id) !== v) return;
+      api.write(id, `${v.run}\r`);
+      v.run = undefined;
+    }, PROMPT_QUIET);
+  }
+});
 api.onExit((id, code) => {
   const v = views.get(id);
   if (!v) return;
