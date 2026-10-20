@@ -17,14 +17,21 @@ if app_running; then
   fi
 fi
 
-# The session host still runs from the installed copy, so it is swapped for the new one rather than
+# The session host still runs from the installed copy, so the new one is swapped in rather than
 # written over: the host keeps the files it has open, and macOS kills a process whose code changes
-# under it.
-rm -rf /Applications/.Liszt-new.app /Applications/.Liszt-old.app
+# under it. Only Contents is swapped, so Liszt.app itself stays the same folder: the Dock keeps an
+# app it holds by that folder's identity, and loses it when the folder goes.
+APP=/Applications/Liszt.app
+rm -rf /Applications/.Liszt-new.app "$APP/.Contents-old"
 ditto release/mac-arm64/Liszt.app /Applications/.Liszt-new.app
-[ -d /Applications/Liszt.app ] && mv /Applications/Liszt.app /Applications/.Liszt-old.app
-mv /Applications/.Liszt-new.app /Applications/Liszt.app
-rm -rf /Applications/.Liszt-old.app
+if [ -d "$APP/Contents" ]; then
+  mv "$APP/Contents" "$APP/.Contents-old"
+  mv /Applications/.Liszt-new.app/Contents "$APP/Contents"
+  rm -rf "$APP/.Contents-old" /Applications/.Liszt-new.app
+else
+  rm -rf "$APP"
+  mv /Applications/.Liszt-new.app "$APP"
+fi
 
 # The Dock looks the icon up by bundle id, so a stray copy (the build output, an old checkout) can lend
 # it an old logo, and killall Dock alone keeps its icon cache. Only the installed copy stays registered.
@@ -32,9 +39,13 @@ LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchSe
 "$LSREGISTER" -dump | awk '/^path:/{p=$2} /local\.liszt\.terminal/{print p}' | sort -u | while read -r app; do
   [ "$app" = /Applications/Liszt.app ] || "$LSREGISTER" -u "$app" 2>/dev/null || true
 done
-touch /Applications/Liszt.app
-"$LSREGISTER" -f /Applications/Liszt.app
+touch "$APP"
+"$LSREGISTER" -f "$APP"
 rm -rf "$(getconf DARWIN_USER_CACHE_DIR)com.apple.dock.iconcache"
-killall Dock
 
-open /Applications/Liszt.app
+# The Dock restarts after Liszt is up: one that comes back while an app is still launching can
+# miss it, and the app then runs with no Dock icon at all.
+open "$APP"
+for _ in $(seq 20); do app_running && break; sleep 0.5; done
+sleep 1
+killall Dock
