@@ -3259,7 +3259,10 @@ function zoomByWheel(e: WheelEvent) {
 function onMenu(command: string) {
   // A shortcut acts on the app as it is, not on what an open menu was about.
   closeMenu();
-  const focused = focusedPaneId ? views.get(focusedPaneId) : undefined;
+  // A project with no sessions leaves the focus on the last project's session, which is not
+  // what is on screen.
+  const last = focusedPaneId ? views.get(focusedPaneId) : undefined;
+  const focused = last?.project.id === state.activeProjectId ? last : undefined;
   if (command.startsWith('project-')) {
     const project = state.projects[Number(command.slice('project-'.length))];
     if (project) activateProject(project.id);
