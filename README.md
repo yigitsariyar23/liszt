@@ -151,6 +151,11 @@ ditto release/mac-arm64/Liszt.app /Applications/Liszt.app
   the Sessions row say what is being waited on (`Waiting on shell · Run the test suite`). When the
   work is done Claude picks up where it left off; the notification and **Unread** only come once
   the last turn ends, and the task card stays In progress until then.
+- Listeners are different: a monitor or a subscription (for example a published artifact Claude
+  keeps watching for comments) never ends by itself. If those are all that is left, the turn
+  counts as finished — notification, **Unread**, task card to Review — and once read the label says
+  **Listening** next to a hollow blue-grey ring. Its tooltip names what is listening. An event on
+  it can still start a new turn.
 - Drag the divider between splits to resize them. The "take out" icon in a split's title removes
   the session from the split but keeps it running as a tab.
 - Project icons are found in the project itself: Unity's app icon, Godot's `config/icon`, Xcode's

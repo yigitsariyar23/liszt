@@ -180,6 +180,8 @@ export interface SpawnOptions {
   terminal?: boolean;
   /** Resume a chat only up to this transcript entry: a rewind. */
   resumeAt?: string;
+  /** Switched over as the turn ended: the background session may take a moment to show it is done. */
+  handover?: boolean;
 }
 
 /**

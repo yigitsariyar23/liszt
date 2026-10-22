@@ -47,11 +47,21 @@ declare global {
 
 const api = window.liszt;
 
-/** `waiting`: Claude ended its turn while background tasks it started still run; it goes on when they finish. */
-type Status = 'starting' | 'idle' | 'running' | 'attention' | 'waiting' | 'exited';
+/**
+ * `waiting`: Claude ended its turn while background tasks it started still run; it goes on when they finish.
+ * `listening`: the turn is over and only listeners are left (a monitor or a subscription, e.g. an
+ * artifact watch). They never finish on their own, so the session is done — it may wake on an event.
+ */
+type Status = 'starting' | 'idle' | 'running' | 'attention' | 'waiting' | 'listening' | 'exited';
 
 /** Claude has work under way, whether it is acting, asking or waiting on its background tasks. */
 const isWorking = (v: PaneView) => v.status === 'running' || v.status === 'attention' || v.status === 'waiting';
+/** Done with its turn: idle, or idle with listeners still open. */
+const isAtRest = (v: PaneView) => v.status === 'idle' || v.status === 'listening';
+
+/** Background work Claude waits on, apart from listeners, which never end by themselves. */
+const LISTENER_TYPES = new Set(['monitor']);
+const isListener = (t: BackgroundTask) => LISTENER_TYPES.has(t.type);
 type DropZone = Side | 'center';
 
 interface PaneView {
@@ -79,6 +89,8 @@ interface PaneView {
   exitCode: number | null;
   /** Last thing the session did, for the Sessions overview. */
   activity: string;
+  /** While `listening`: what still listens, for the chip's tooltip. */
+  listening?: string;
   /** Tool calls in the current turn. */
   actions: number;
   /** A hook arrived since the last spawn, so hooks drive the status. */
@@ -92,6 +104,10 @@ interface PaneView {
   /** A command the shell runs once it is up, typed in as if by hand. */
   run?: string;
   runTimer?: number;
+  /** A draft the chat had, pasted at Claude Code's prompt once the terminal has drawn it. */
+  typeIn?: string;
+  /** Asked to switch between chat and terminal while working; it switches when the turn ends. */
+  switchPending?: boolean;
 }
 
 interface PaneOptions {
@@ -466,20 +482,34 @@ function paintView(v: PaneView) {
   v.el.classList.toggle('as-terminal', terminal);
   const btn = v.el.querySelector<HTMLElement>('.view-switch');
   if (btn) {
+    const to = terminal ? 'chat' : 'terminal';
     btn.innerHTML = terminal ? ICONS.chat : ICONS.shell;
-    btn.title = terminal ? 'Show as chat (⌘E)' : 'Show in the terminal (⌘E)';
+    btn.classList.toggle('pending', Boolean(v.switchPending));
+    btn.title = v.switchPending
+      ? `Goes on in the ${to} once this turn ends (⌘E to stay)`
+      : terminal
+        ? 'Show as chat (⌘E)'
+        : 'Show in the terminal (⌘E)';
   }
   if (terminal) scheduleFit(v);
 }
 
 /**
  * Moves a Claude session between the chat and Claude Code's terminal UI. Only one of them can run
- * the session, so the one showing stops and the other resumes the same conversation.
+ * the session, so the one showing stops and the other resumes the same conversation. A turn under
+ * way is not cut short: the switch waits for it to end, and asking again calls it off.
  */
-function switchView(v: PaneView) {
+function switchView(v: PaneView, handover = false) {
   if (v.pane.kind !== 'claude') return;
-  const to = v.pane.terminal ? 'chat' : 'terminal';
-  if (isWorking(v) && !confirm(`"${displayTitle(v)}" is still working. Switching stops its turn and the session goes on in the ${to}. Switch?`)) return;
+  if (isWorking(v)) {
+    v.switchPending = !v.switchPending || undefined;
+    paintView(v);
+    return;
+  }
+  v.switchPending = undefined;
+  // What is typed and not sent yet goes along.
+  const draft = v.pane.terminal ? terminalDraft(v) : v.chat?.draftText;
+  v.typeIn = undefined;
   v.pane.terminal = !v.pane.terminal || undefined;
   // The terminal gets a background session of its own, resumed from where the chat left off; one
   // the pane had before stopped when it went to the chat.
@@ -489,9 +519,69 @@ function switchView(v: PaneView) {
   paintView(v);
   if (v.spawned) {
     api.kill(v.pane.id);
-    void spawn(v, continues(v.pane));
+    void spawn(v, continues(v.pane), undefined, undefined, handover);
   }
-  focusView(v);
+  // A switch made when the turn ended leaves the keyboard where it is.
+  const focus = !handover || focusedPaneId === v.pane.id;
+  if (v.pane.terminal) v.typeIn = draft || undefined;
+  else if (draft != null) v.chat?.setDraft(draft, focus);
+  if (focus) focusView(v);
+}
+
+/** The rules above and below Claude Code's prompt. */
+const PROMPT_RULE = /^─+$/;
+/** The prompt's first line starts with its sign, `❯` or `!` in bash mode, and a no-break space. */
+const PROMPT_SIGN = /^[❯>!](?:[  ]|$)/;
+
+/**
+ * What is typed at Claude Code's prompt in a pane's terminal, read off the screen: the lines between
+ * the two rules around the prompt. Its placeholder is dim and not part of it. Claude Code wraps long
+ * lines at word breaks, so a line ends a line of the draft only where the next word would have fit
+ * on it. Null when no prompt shows.
+ */
+function terminalDraft(v: PaneView): string | null {
+  const term = v.term;
+  if (!term) return null;
+  const buf = term.buffer.active;
+  const text = (y: number) => {
+    const line = buf.getLine(y);
+    let s = '';
+    for (let x = 0; line && x < term.cols; x++) {
+      const cell = line.getCell(x);
+      // The second half of a wide character has no width of its own.
+      if (cell && cell.getWidth() && !cell.isDim()) s += cell.getChars() || ' ';
+    }
+    return s.trimEnd();
+  };
+  const top = buf.baseY;
+  for (let end = top + term.rows - 1; end > top; end--) {
+    if (!PROMPT_RULE.test(text(end))) continue;
+    let start = end - 1;
+    while (start >= top && !PROMPT_RULE.test(text(start))) start--;
+    if (start < top) return null;
+    const lines: string[] = [];
+    for (let y = start + 1; y < end; y++) lines.push(text(y));
+    // Two rules around something else, a table say; the prompt is further up.
+    if (!lines.length || !PROMPT_SIGN.test(lines[0])) {
+      end = start + 1;
+      continue;
+    }
+    const bash = lines[0].startsWith('!');
+    const body = lines.map((l) => l.slice(2));
+    // The sign takes two columns and the right edge two more.
+    const width = term.cols - 4;
+    let draft = body[0];
+    for (let i = 1; i < body.length; i++) {
+      const prev = body[i - 1];
+      const word = body[i].split(' ')[0].length;
+      // A full line broke a word; one the next word would not fit on wrapped at a space. A word as long
+      // as a line runs on past it, and fits on none.
+      const wrapped = word < width && prev.length + 1 + word > width;
+      draft += prev.length >= width ? body[i] : wrapped ? ` ${body[i]}` : `\n${body[i]}`;
+    }
+    return bash ? `!${draft}` : draft;
+  }
+  return null;
 }
 
 function scheduleFit(v: PaneView) {
@@ -527,7 +617,8 @@ async function fillWelcome(v: PaneView) {
   chat.setWelcome({ ...base, branch: git?.branch ?? base.branch, icon: projectIcon(v.project), info });
 }
 
-async function spawn(v: PaneView, resume: boolean, prompt?: string, resumeAt?: string) {
+/** `handover`: the turn the other side ran has just ended, and its background session may still be settling. */
+async function spawn(v: PaneView, resume: boolean, prompt?: string, resumeAt?: string, handover = false) {
   // A session id is only reused for --resume; a fresh start always gets a new one so it never
   // collides with an id claude has already seen.
   if (v.pane.kind === 'claude' && !resume) {
@@ -537,6 +628,11 @@ async function spawn(v: PaneView, resume: boolean, prompt?: string, resumeAt?: s
     v.pane.started = false;
     v.pane.bgId = undefined;
     save();
+  }
+  // A switch waiting on a turn that a restart or a switch ended is off.
+  if (v.switchPending) {
+    v.switchPending = undefined;
+    paintView(v);
   }
   v.spawned = true;
   v.exitCode = null;
@@ -570,6 +666,7 @@ async function spawn(v: PaneView, resume: boolean, prompt?: string, resumeAt?: s
     newProject: v.pane.newProject,
     terminal: v.pane.kind === 'claude' && inTerminal(v),
     resumeAt,
+    handover,
   });
   // Closed while claude started.
   if (views.get(v.pane.id) !== v) return;
@@ -675,6 +772,8 @@ function chipText(v: PaneView): string {
       return 'Needs you';
     case 'waiting':
       return `Waiting · ${duration(Date.now() - v.since)}`;
+    case 'listening':
+      return isUnread(v) ? 'Unread' : 'Listening';
     case 'idle':
       return isUnread(v) ? 'Unread' : (shownShipped(v) ? SHIPPED_TEXT[shownShipped(v)!] : 'Idle');
     case 'exited':
@@ -689,8 +788,8 @@ const chipClass = (v: PaneView) => `chip ${isUnread(v) ? 'unread' : shownShipped
 function paintChip(el: HTMLElement, v: PaneView) {
   el.className = chipClass(v);
   el.textContent = chipText(v);
-  // Says what it waits on.
-  el.title = v.status === 'waiting' ? v.activity : '';
+  // Says what it waits on, or what still listens.
+  el.title = v.status === 'waiting' ? v.activity : v.status === 'listening' ? v.listening ?? '' : '';
 }
 
 function renderChip(v: PaneView) {
@@ -706,11 +805,11 @@ function renderChip(v: PaneView) {
  * A reply waits to be read: shown instead of Idle until the user goes to the session. Sessions of
  * projects not opened since launch have not started yet and show it too.
  */
-const isUnread = (v: PaneView) => Boolean(v.pane.unread) && (v.status === 'idle' || !v.spawned);
+const isUnread = (v: PaneView) => Boolean(v.pane.unread) && (isAtRest(v) || !v.spawned);
 
 const dotClass = (v: PaneView) => {
   if (isUnread(v)) return 'unread';
-  if (['running', 'attention', 'waiting', 'exited'].includes(v.status)) return v.status;
+  if (['running', 'attention', 'waiting', 'listening', 'exited'].includes(v.status)) return v.status;
   return shownShipped(v) ?? '';
 };
 
@@ -724,10 +823,18 @@ function setUnread(v: PaneView, unread: boolean) {
   save();
 }
 
-/** Claude ended its turn; the reply stays unread unless the user is watching the session. */
-function finishTurn(v: PaneView) {
+/**
+ * Claude ended its turn; the reply stays unread unless the user is watching the session. Listeners
+ * it left open (monitors, subscriptions) keep it `listening` rather than idle.
+ */
+function finishTurn(v: PaneView, listeners: BackgroundTask[] = []) {
   if (!watching(v)) v.pane.unread = true;
-  setStatus(v, 'idle');
+  v.listening = listeners.length ? listeningTo(listeners) : undefined;
+  setStatus(v, listeners.length ? 'listening' : 'idle');
+  // A switch asked for during the turn, made after the hook that ended it is handled. A message
+  // queued in the chat starts the next turn, and the switch waits for that one.
+  if (v.switchPending && !(v.chat?.hasQueued && !inTerminal(v)))
+    setTimeout(() => views.get(v.pane.id) === v && v.switchPending && !isWorking(v) && switchView(v, true));
 }
 
 function renderActions(v: PaneView) {
@@ -802,7 +909,7 @@ function renameTab(v: PaneView) {
 }
 
 /** Claude Code takes typed commands while its turn is over, background tasks or not. */
-const atPrompt = (v: PaneView) => v.pane.kind === 'claude' && v.pane.started && v.spawned && (v.status === 'idle' || v.status === 'waiting');
+const atPrompt = (v: PaneView) => v.pane.kind === 'claude' && v.pane.started && v.spawned && (isAtRest(v) || v.status === 'waiting');
 
 /** How long the name asked of Claude may take to arrive; the model makes it up. */
 const RENAME_WAIT = 60_000;
@@ -886,7 +993,10 @@ async function sessionMenu(v: PaneView, from: 'tab' | 'head', at: MenuAnchor) {
     'separator',
     { label: 'Reveal in Finder', id: 'reveal', key: 'f' },
   );
-  if (v.pane.kind === 'claude') entries.push({ label: v.pane.terminal ? 'Show as Chat' : 'Show in Terminal', id: 'toggle-view', key: 'e' });
+  if (v.pane.kind === 'claude') {
+    const label = v.pane.terminal ? 'Show as Chat' : 'Show in Terminal';
+    entries.push({ label: v.switchPending ? `Stay in the ${v.pane.terminal ? 'Terminal' : 'Chat'}` : isWorking(v) ? `${label} When Done` : label, id: 'toggle-view', key: 'e' });
+  }
   if (v.pane.kind === 'claude') entries.push({ label: 'Copy Session ID', id: 'copy-id', key: 'i', enabled: v.pane.started });
   entries.push('separator', { label: 'Close Session', id: 'close', key: 'c' }, { label: 'Close Other Sessions', id: 'close-others', key: 'o', enabled: project.panes.length > 1 });
   const choice = await showMenu(entries, at);
@@ -2214,7 +2324,7 @@ function setAutopilot(on: boolean) {
 // own: it never writes to the Claude app's files, and it keeps the title and folder of a session
 // archived from it.
 
-const STATUS_ORDER: Record<Status, number> = { attention: 0, running: 1, waiting: 2, starting: 3, idle: 4, exited: 5 };
+const STATUS_ORDER: Record<Status, number> = { attention: 0, running: 1, waiting: 2, starting: 3, listening: 4, idle: 4, exited: 5 };
 /** Replies waiting to be read sort right after the working sessions. */
 const UNREAD_RANK = 2.5;
 /** Sessions nothing runs sort after every running one. */
@@ -2830,6 +2940,8 @@ function syncAttached(v: PaneView) {
   if (!a) return;
   const status: Status = a.status === 'busy' ? 'running' : 'idle';
   if (status === v.status) return;
+  // Claude Code calls a session with only listeners left idle; the Stop hook already said so.
+  if (status === 'idle' && v.status === 'listening') return;
   if (status === 'idle' && (v.status === 'running' || v.pane.working)) finishTurn(v);
   else setStatus(v, status);
 }
@@ -3054,14 +3166,14 @@ function onHook(ev: HookEvent) {
       }
       break;
     case 'Stop':
-      if ((v.status === 'running' || v.status === 'attention') && ev.tasks?.length) {
+      if ((v.status === 'running' || v.status === 'attention') && workTasks(ev.tasks).length) {
         // Not finished: Claude takes the work up again when its background tasks end.
-        v.activity = waitingOn(ev.tasks);
+        v.activity = waitingOn(workTasks(ev.tasks));
         setStatus(v, 'waiting', true);
       } else if (v.status === 'running' || v.status === 'attention') {
         const took = duration(Date.now() - v.since);
         v.activity = `Finished in ${took}${v.actions ? ` · ${v.actions} tool ${v.actions === 1 ? 'call' : 'calls'}` : ''}`;
-        finishTurn(v);
+        finishTurn(v, (ev.tasks ?? []).filter(isListener));
         notify(v, v.activity, 'done');
       }
       if (v.moveTo && !isWorking(v)) void moveSession(v);
@@ -3072,7 +3184,7 @@ function onHook(ev: HookEvent) {
   if (task) {
     if (v.pane.started) task.sessionId = v.pane.sessionId;
     if (ev.event === 'UserPromptSubmit' && task.status === 'review') setTaskStatus(v.project, task, 'doing');
-    if (ev.event === 'Stop' && !ev.tasks?.length && task.status === 'doing') setTaskStatus(v.project, task, 'review');
+    if (ev.event === 'Stop' && !workTasks(ev.tasks).length && task.status === 'doing') setTaskStatus(v.project, task, 'review');
   }
   v.chat?.setActivity(v.status === 'running' ? v.activity : '');
   save();
@@ -3081,6 +3193,15 @@ function onHook(ev: HookEvent) {
 /** The prompt Claude Code submits itself when a background task ends, and the line that says how. */
 const TASK_NOTIFICATION = /^\s*<task-notification>/;
 const TASK_SUMMARY = /<summary>([^<]*)<\/summary>/;
+
+/** The background tasks a Stop hook lists that Claude will come back to (not listeners). */
+const workTasks = (tasks: BackgroundTask[] | undefined) => (tasks ?? []).filter((t) => !isListener(t));
+
+/** What still listens after the turn, for the chip's tooltip. */
+function listeningTo(tasks: BackgroundTask[]): string {
+  if (tasks.length > 1) return `Listening on ${tasks.length} monitors`;
+  return `Listening · ${tasks[0].label}`;
+}
 
 /** What a session waits on, for its activity line. */
 function waitingOn(tasks: BackgroundTask[]): string {

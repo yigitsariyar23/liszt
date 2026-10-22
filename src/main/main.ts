@@ -388,6 +388,20 @@ async function startBackground(o: SpawnOptions, resume: boolean, sessionId: stri
   return { bgId, sessionId: id ?? sessionId };
 }
 
+/** How long a switch made as the turn ended waits for the background session to show it is done. */
+const HANDOVER_WAIT = 5000;
+
+/** Whether a background session is still at work, waited on for up to `wait` ms to finish. */
+async function busyBackground(bgId: string, wait: number): Promise<boolean> {
+  const until = Date.now() + wait;
+  for (;;) {
+    const job = (await listAgents())?.find((a) => a.kind === 'background' && a.id === bgId && !a.ended);
+    if (!job || job.status === 'idle') return false;
+    if (Date.now() >= until) return true;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+
 /**
  * Stops the background session a pane ran in the terminal, so the chat can resume its conversation,
  * and removes it; its transcript stays. Left stopped, it makes the next `claude --bg --resume` of
@@ -430,8 +444,7 @@ ipcMain.handle('pty:spawn', async (_e, o: SpawnOptions): Promise<SpawnResult> =>
   if (o.kind === 'claude' && !o.terminal) {
     if (resume && o.attach) {
       // A background session still at work is left to it; the pane shows it in the terminal.
-      const job = (await listAgents())?.find((a) => a.kind === 'background' && a.id === o.attach && !a.ended);
-      if (job && job.status !== 'idle') return { ok: false, error: BUSY_IN_BACKGROUND };
+      if (await busyBackground(o.attach, o.handover ? HANDOVER_WAIT : 0)) return { ok: false, error: BUSY_IN_BACKGROUND };
       await releaseBackground(sessionId, o.attach);
     }
     // Claude cleans up old transcripts; a resume of one that is gone fails, so start a new session instead.

@@ -389,10 +389,21 @@ export class ChatView {
     this.setBusy(false);
   }
 
+  /** Messages sent while Claude worked that it has not taken up yet; they start the next turn. */
+  get hasQueued(): boolean {
+    return this.queued.size > 0;
+  }
+
+  /** What is typed in the composer and not sent yet. */
+  get draftText(): string {
+    return this.input.value;
+  }
+
   /** Puts text in the composer, as a rewind does with the prompt it took back. */
-  setDraft(text: string) {
+  setDraft(text: string, focus = true) {
     this.input.value = text;
     this.grow();
+    if (!focus) return;
     this.focus();
     this.input.setSelectionRange(text.length, text.length);
   }
