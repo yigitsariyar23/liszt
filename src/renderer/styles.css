@@ -1025,8 +1025,37 @@ body[data-side='sessions'] #sessions-view {
 }
 
 .term-host {
+  position: relative;
   width: 100%;
   height: 100%;
+}
+
+/* Rewind and Edit over the terminal prompt the pointer is on, at the right end of its first line. */
+.term-prompt-actions {
+  position: absolute;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.term-prompt-actions[hidden],
+.term-prompt-actions button[hidden] {
+  display: none;
+}
+
+.term-prompt-actions button {
+  padding: 1px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  font: 11px -apple-system, BlinkMacSystemFont, sans-serif;
+  color: var(--muted);
+  background: var(--panel);
+}
+
+.term-prompt-actions button:hover {
+  color: var(--text);
+  border-color: var(--text);
 }
 
 .xterm .xterm-viewport {

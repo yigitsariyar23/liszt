@@ -33,7 +33,7 @@ import type {
   TaskStatus,
   TranscriptSession,
 } from '../shared/types';
-import { ChatView } from './chat';
+import { ChatView, type PromptRef } from './chat';
 import { h, iconEl } from './dom';
 import { ICONS, KIND_GLYPH } from './icons';
 import { leaf, panesIn, removePane, replacePane, splitPane, type Side } from './layout';
@@ -108,6 +108,10 @@ interface PaneView {
   typeIn?: string;
   /** Asked to switch between chat and terminal while working; it switches when the turn ends. */
   switchPending?: boolean;
+  /** The Rewind and Edit buttons shown over the terminal prompt the pointer is on. */
+  promptActions?: HTMLElement;
+  /** A rewind to just after a reply: the prompt Claude Code puts back in its input is cleared. */
+  rewindClear?: { text: string; lines: number; until: number; timer?: number };
 }
 
 interface PaneOptions {
@@ -333,7 +337,7 @@ function createView(project: ProjectState, pane: PaneState): PaneView {
       files: () => api.chatFiles(pane.cwd ?? project.path),
       pickModel: (anchor) => void pickModel(v, anchor),
       stopTask: (taskId) => api.chatStopTask(pane.id, taskId),
-      rewind: (index, text) => void rewindTo(v, index, text),
+      rewind: (prompt, edit) => void rewindTo(v, prompt, edit),
       answer: (id, a) => answerAsk(v, id, a),
       interrupt: () => api.chatInterrupt(pane.id),
       setMode: (mode) => api.chatMode(pane.id, mode),
@@ -444,6 +448,7 @@ function ensureTerminal(v: PaneView): Terminal {
   }
   v.term = term;
   v.fit = fit;
+  if (pane.kind === 'claude') attachPromptActions(v, term);
 
   term.onData((data) => api.write(pane.id, data));
   // Typing into a session reads it. What else the terminal sends does not: focus and mouse reports,
@@ -582,6 +587,189 @@ function terminalDraft(v: PaneView): string | null {
     return bash ? `!${draft}` : draft;
   }
   return null;
+}
+
+// --- Rewinding in the terminal ---------------------------------------------------------------------
+//
+// Claude Code draws each prompt of the conversation as a `❯` line on a shaded background. Over the
+// one the pointer is on, Rewind and Edit do what they do in the chat, through Claude Code's own
+// rewind picker (Esc Esc): the prompt is picked in it, and Claude Code asks what to restore.
+
+/** A line of the terminal's buffer as text, and whether it starts on a shaded background. */
+function bufferLine(term: Terminal, y: number): { text: string; shaded: boolean } {
+  const line = term.buffer.active.getLine(y);
+  if (!line) return { text: '', shaded: false };
+  const first = line.getCell(0);
+  return { text: line.translateToString(true), shaded: Boolean(first && !first.isBgDefault()) };
+}
+
+/** The first line of the conversation prompt that line `y` is part of, or -1. */
+function promptStart(term: Terminal, y: number): number {
+  for (let at = y, n = 0; at >= 0 && n < 60; at--, n++) {
+    const line = bufferLine(term, at);
+    if (!line.shaded) return -1;
+    if (line.text.startsWith('❯')) return at;
+  }
+  return -1;
+}
+
+/** The first lines of the conversation prompts from line `from` down. */
+function promptsBelow(term: Terminal, from: number): number[] {
+  const starts: number[] = [];
+  const buf = term.buffer.active;
+  for (let y = from; y < buf.length; y++) {
+    const line = bufferLine(term, y);
+    if (line.shaded && line.text.startsWith('❯')) starts.push(y);
+  }
+  return starts;
+}
+
+/** How many lines the conversation prompt starting at line `y` takes. */
+function promptLines(term: Terminal, y: number): number {
+  let n = 1;
+  while (n < 60 && bufferLine(term, y + n).shaded && !bufferLine(term, y + n).text.startsWith('❯')) n++;
+  return n;
+}
+
+/** The first line of Claude Code's input on the screen, without its `❯`: unlike the conversation's prompts it is not shaded. */
+function inputHead(term: Terminal): string | null {
+  const buf = term.buffer.active;
+  for (let y = buf.baseY + term.rows - 1; y >= buf.baseY; y--) {
+    const line = bufferLine(term, y);
+    if (!line.shaded && /^❯(?:[ \u00a0]|$)/.test(line.text)) return line.text.slice(1).trim();
+  }
+  return null;
+}
+
+/** A prompt's first line as Claude Code shows it, without the `❯`. */
+const promptHead = (term: Terminal, y: number) => bufferLine(term, y).text.slice(1).trim();
+
+function attachPromptActions(v: PaneView, term: Terminal) {
+  const bar = h('div', 'term-prompt-actions');
+  const rewind = h('button', undefined, 'Rewind');
+  rewind.title = 'Rewind the conversation to just after this reply; what came later is forgotten';
+  const edit = h('button', undefined, 'Edit');
+  edit.title = 'Edit this prompt: the conversation goes back to just before it';
+  bar.append(rewind, edit);
+  bar.hidden = true;
+  v.termHost.append(bar);
+  v.promptActions = bar;
+  let start = -1;
+  const hide = () => {
+    bar.hidden = true;
+    start = -1;
+  };
+  v.termHost.addEventListener('mousemove', (e) => {
+    if (bar.contains(e.target as Node)) return;
+    const screen = v.termHost.querySelector<HTMLElement>('.xterm-screen');
+    if (!screen || !v.pane.started || !inTerminal(v)) return hide();
+    const r = screen.getBoundingClientRect();
+    const rowH = r.height / term.rows;
+    const row = Math.floor((e.clientY - r.top) / rowH);
+    if (row < 0 || row >= term.rows || e.clientX < r.left || e.clientX > r.right) return hide();
+    const at = promptStart(term, term.buffer.active.viewportY + row);
+    if (at < 0) return hide();
+    start = at;
+    rewind.hidden = promptsBelow(term, at + 1).length === 0;
+    const host = v.termHost.getBoundingClientRect();
+    const top = Math.max(0, at - term.buffer.active.viewportY) * rowH;
+    bar.style.top = `${r.top - host.top + top}px`;
+    bar.style.right = `${host.right - r.right + 4}px`;
+    bar.style.height = `${rowH}px`;
+    bar.hidden = false;
+  });
+  v.termHost.addEventListener('mouseleave', hide);
+  term.onScroll(hide);
+  const go = (e: MouseEvent, after: boolean) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const at = start;
+    hide();
+    if (at >= 0) void rewindTerminal(v, term, at, after);
+  };
+  // Pressed before xterm sees the click, so it starts no selection and keeps the focus where it is.
+  for (const b of [rewind, edit]) b.addEventListener('mousedown', (e) => e.preventDefault());
+  rewind.addEventListener('click', (e) => go(e, true));
+  edit.addEventListener('click', (e) => go(e, false));
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** The rows of Claude Code's rewind picker on the screen, from its title down; null when it is not open. */
+function rewindPicker(term: Terminal): string[] | null {
+  const buf = term.buffer.active;
+  const rows: string[] = [];
+  for (let y = buf.baseY; y < buf.baseY + term.rows; y++) rows.push(bufferLine(term, y).text);
+  const title = rows.findIndex((t) => t.trim() === 'Rewind');
+  if (title < 0 || !rows.slice(title).some((t) => /Enter to continue/.test(t))) return null;
+  return rows.slice(title);
+}
+
+/** Whether the picker's chosen row, cut short with `…` when long, shows the prompt whose first line is `head`. */
+function pickedIs(rows: string[], head: string): boolean {
+  const picked = rows.map((t) => /^\s+❯\s+(.*)$/.exec(t)?.[1]).find((t) => t !== undefined);
+  if (picked === undefined) return false;
+  const a = picked.replace(/…$/, '').trim();
+  const n = Math.min(a.length, head.length);
+  return n > 0 && a.slice(0, n) === head.slice(0, n);
+}
+
+/**
+ * Rewinds a session in the terminal to just before the prompt drawn at line `at`, or with `after`
+ * to just after its reply, i.e. before the next prompt. Claude Code's rewind picker lists the
+ * prompts with the newest last, so the one wanted is as many rows up as there are prompts from it
+ * down. It is chosen there if it is the one the picker shows, and Claude Code then asks what to
+ * restore; otherwise the picker is left open to choose by hand.
+ */
+async function rewindTerminal(v: PaneView, term: Terminal, at: number, after: boolean) {
+  const prompts = promptsBelow(term, at);
+  const target = after ? prompts[1] : prompts[0];
+  if (target === undefined) return;
+  const head = promptHead(term, target);
+  const ups = prompts.length - prompts.indexOf(target);
+  const id = v.pane.id;
+  // Esc stops a turn under way; the picker opens at the prompt.
+  if (!(await stopTurn(v, () => api.write(id, '\x1b')))) return;
+  term.focus();
+  let rows: string[] | null = null;
+  // A first Esc Esc clears what is typed at the prompt instead.
+  for (let tries = 0; tries < 3 && !rows; tries++) {
+    api.write(id, '\x1b');
+    await sleep(200);
+    api.write(id, '\x1b');
+    for (let waited = 0; waited < 2000 && !(rows = rewindPicker(term)); waited += 100) await sleep(100);
+  }
+  if (!rows || views.get(id) !== v) return;
+  for (let i = 0; i < ups; i++) {
+    api.write(id, '\x1b[A');
+    await sleep(40);
+  }
+  await sleep(250);
+  rows = rewindPicker(term);
+  if (!rows || !pickedIs(rows, head)) return;
+  // Rewound to just before the next prompt, Claude Code puts that prompt back in its input.
+  if (after) v.rewindClear = { text: head, lines: promptLines(term, target), until: Date.now() + 60_000 };
+  api.write(id, '\r');
+}
+
+/**
+ * After a rewind to just after a reply, clears the prompt Claude Code put back in its input, once
+ * the picker has closed. Choosing not to restore the conversation leaves the input empty, and the
+ * wait for it runs out.
+ */
+function clearRewoundPrompt(v: PaneView) {
+  const want = v.rewindClear;
+  if (!want || !v.term) return;
+  if (Date.now() > want.until) return void (v.rewindClear = undefined);
+  // The picker, or Claude Code's question after it, is still up.
+  if (rewindPicker(v.term)) return;
+  // Empty, the input may not have been filled yet; until it is, or the wait runs out.
+  const input = inputHead(v.term);
+  if (!input) return;
+  v.rewindClear = undefined;
+  if (!input.startsWith(want.text.slice(0, 20))) return;
+  // ⌃U deletes back to the start of a line, ⌫ joins it to the line before.
+  api.write(v.pane.id, '\x15\x7f'.repeat(want.lines) + '\x15');
 }
 
 function scheduleFit(v: PaneView) {
@@ -3036,12 +3224,25 @@ async function pickModel(v: PaneView, anchor: HTMLElement) {
   v.chat?.setModel(models.find((m) => m.value === v.model)?.displayName ?? v.model ?? '', v.effort);
 }
 
+/** How long a rewind waits for the turn it stopped to end. */
+const REWIND_STOP_WAIT = 5000;
+
+/** Stops the turn under way, if any, and waits a little for it to end; true once it has. */
+async function stopTurn(v: PaneView, stop: () => void): Promise<boolean> {
+  if (v.status !== 'running' && v.status !== 'attention') return true;
+  stop();
+  const until = Date.now() + REWIND_STOP_WAIT;
+  while ((v.status === 'running' || v.status === 'attention') && Date.now() < until) await new Promise((r) => setTimeout(r, 100));
+  return views.get(v.pane.id) === v && v.status !== 'running' && v.status !== 'attention';
+}
+
 /**
- * Takes back the user's `index`th prompt: the session resumes from just before it, or starts over
- * when it was the first, and its text returns to the composer. Claude's changes to files can go
- * back too, from the checkpoints Claude Code keeps.
+ * Takes the conversation back to just before one of the user's prompts: the session resumes from
+ * there, or starts over when it was the first. `edit`: the prompt's text returns to the composer to
+ * be sent again. Claude's changes to files can go back too, from the checkpoints Claude Code keeps.
+ * A turn under way is stopped first.
  */
-async function rewindTo(v: PaneView, index: number, text: string) {
+async function rewindTo(v: PaneView, prompt: PromptRef, edit: boolean) {
   const r = v.el.getBoundingClientRect();
   const choice = await showMenu(
     [
@@ -3051,14 +3252,18 @@ async function rewindTo(v: PaneView, index: number, text: string) {
     { x: r.left + r.width / 2 - 140, y: r.top + r.height / 2 },
   );
   if (!choice || views.get(v.pane.id) !== v) return;
-  const res = await api.chatRewind(v.pane.id, v.pane.sessionId, v.pane.cwd ?? v.project.path, index, choice === 'code');
+  await stopTurn(v, () => api.chatInterrupt(v.pane.id));
+  // Files go back through the running session; one that has ended is started again for it.
+  if (choice === 'code' && !(await ensureChat(v))) return;
+  if (views.get(v.pane.id) !== v) return;
+  const res = await api.chatRewind(v.pane.id, v.pane.sessionId, v.pane.cwd ?? v.project.path, prompt.index, prompt.text, prompt.nth, choice === 'code');
   if (views.get(v.pane.id) !== v) return;
   if (!res.ok) return v.chat?.error(`Could not rewind: ${res.error}`);
   api.kill(v.pane.id);
   v.pane.rewoundTo = res.resumeAt ?? undefined;
   save();
   await spawn(v, Boolean(res.resumeAt), undefined, res.resumeAt ?? undefined);
-  if (views.get(v.pane.id) === v) v.chat?.setDraft(res.text || text);
+  if (edit && views.get(v.pane.id) === v) v.chat?.setDraft(res.text || prompt.text);
 }
 
 function answerAsk(v: PaneView, id: string, a: ChatAnswer) {
@@ -3450,6 +3655,19 @@ api.onData((id, data) => {
       if (!v.run || views.get(id) !== v) return;
       api.write(id, `${v.run}\r`);
       v.run = undefined;
+    }, PROMPT_QUIET);
+  }
+  if (v?.rewindClear) {
+    clearTimeout(v.rewindClear.timer);
+    v.rewindClear.timer = window.setTimeout(() => views.get(id) === v && clearRewoundPrompt(v), PROMPT_QUIET);
+  }
+  // A draft from the chat is pasted once Claude Code shows its prompt; pasted, its lines do not send it.
+  if (v?.typeIn) {
+    clearTimeout(v.runTimer);
+    v.runTimer = window.setTimeout(() => {
+      if (!v.typeIn || views.get(id) !== v || !inTerminal(v) || terminalDraft(v) === null) return;
+      api.write(id, `\x1b[200~${v.typeIn}\x1b[201~`);
+      v.typeIn = undefined;
     }, PROMPT_QUIET);
   }
 });

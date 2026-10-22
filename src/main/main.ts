@@ -563,7 +563,9 @@ ipcMain.handle('chat:models', (_e, id: string) => chatModels(id));
 ipcMain.on('chat:model', (_e, id: string, model: string) => void setChatModel(id, model));
 ipcMain.on('chat:effort', (_e, id: string, effort: EffortLevel) => void setChatEffort(id, effort));
 ipcMain.on('chat:stop-task', (_e, id: string, taskId: string) => void stopChatTask(id, taskId));
-ipcMain.handle('chat:rewind', (_e, id: string, sessionId: string, cwd: string, index: number, files: boolean) => rewindChat(id, sessionId, cwd, index, files));
+ipcMain.handle('chat:rewind', (_e, id: string, sessionId: string, cwd: string, index: number, text: string, nth: number, files: boolean) =>
+  rewindChat(id, sessionId, cwd, index, text, nth, files),
+);
 ipcMain.handle('chat:bash', (_e, id: string, cwd: string, command: string) => runBash(id, cwd, command));
 ipcMain.on('chat:bash-cancel', (_e, id: string) => cancelBash(id));
 ipcMain.handle('chat:files', (_e, cwd: string) => projectFiles(cwd));

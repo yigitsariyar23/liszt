@@ -295,25 +295,35 @@ export async function chatInfo(paneId: string): Promise<ChatInfo | null> {
 }
 
 /**
- * Where to resume a session so it forgets the user's `index`th prompt and everything after: the
+ * Where to resume a session so it forgets one of the user's prompts and everything after: the
  * transcript entry just before that prompt, or null to start over when it was the first. With
  * `files`, the files Claude changed since go back to how they were when the prompt was sent.
+ *
+ * The chat names the prompt by its place among the prompts it shows (`index`), its text, and how
+ * many prompts before it had the same text (`nth`). The place alone can be off: the chat and the
+ * transcript need not hold the same prompts, so the text decides, and the place only breaks a tie.
  */
 export async function rewindChat(
   paneId: string,
   sessionId: string,
   cwd: string,
   index: number,
+  text: string,
+  nth: number,
   files: boolean,
 ): Promise<{ ok: true; resumeAt: string | null; text: string } | { ok: false; error: string }> {
   const messages = (await chatHistory(sessionId, cwd)) as (ChatMessage & { uuid: string })[];
-  let seen = -1;
-  const at = messages.findIndex((m) => {
-    if (m.type !== 'user' || m.parent_tool_use_id) return false;
-    if (promptText((m.message as { content?: unknown })?.content) === null) return false;
-    return ++seen === index;
+  const prompts: { at: number; text: string }[] = [];
+  messages.forEach((m, at) => {
+    if (m.type !== 'user' || m.parent_tool_use_id) return;
+    const t = promptText((m.message as { content?: unknown })?.content);
+    if (t !== null) prompts.push({ at, text: t.trim() });
   });
-  if (at < 0) return { ok: false, error: 'That message is not in the session’s transcript yet.' };
+  const want = text.trim();
+  const same = prompts.filter((p) => p.text === want);
+  const found = !want || prompts[index]?.text === want ? prompts[index] : (same[nth] ?? (same.length === 1 ? same[0] : undefined));
+  if (!found) return { ok: false, error: 'That message is not in the session’s transcript yet.' };
+  const at = found.at;
   if (files) {
     const chat = chats.get(paneId);
     if (!chat) return { ok: false, error: 'The session is not running, so its files cannot be put back.' };

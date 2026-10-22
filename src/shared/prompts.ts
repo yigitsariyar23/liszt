@@ -4,6 +4,9 @@
 /** Claude Code's own markup at the start of a user turn: commands, their output, reminders, `!` commands. */
 export const META = /^\s*<(command-name|command-message|command-args|local-command-stdout|local-command-stderr|local-command-caveat|system-reminder|task-notification|bash-input|bash-stdout|bash-stderr)>/;
 
+/** What Claude Code records as a user turn when a turn is stopped; nobody typed it. */
+const INTERRUPTED = /^\[Request interrupted by user[^\]]*\]$/;
+
 type Block = { type: string; text?: unknown };
 
 /** The text of a user turn the user typed, or null for tool results and Claude Code's own additions. */
@@ -14,7 +17,7 @@ export function promptText(content: unknown): string | null {
     .filter((b) => b.type === 'text')
     .map((b) => String(b.text))
     .join('\n\n');
-  if (META.test(text)) return null;
+  if (META.test(text) || INTERRUPTED.test(text.trim())) return null;
   // An image alone is a prompt too.
   return text || blocks.some((b) => b.type === 'image') ? text : null;
 }

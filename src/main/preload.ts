@@ -43,8 +43,16 @@ const api = {
   chatModel: (id: string, model: string) => ipcRenderer.send('chat:model', id, model),
   chatEffort: (id: string, effort: EffortLevel) => ipcRenderer.send('chat:effort', id, effort),
   chatStopTask: (id: string, taskId: string) => ipcRenderer.send('chat:stop-task', id, taskId),
-  chatRewind: (id: string, sessionId: string, cwd: string, index: number, files: boolean): Promise<{ ok: true; resumeAt: string | null; text: string } | { ok: false; error: string }> =>
-    ipcRenderer.invoke('chat:rewind', id, sessionId, cwd, index, files),
+  chatRewind: (
+    id: string,
+    sessionId: string,
+    cwd: string,
+    index: number,
+    text: string,
+    nth: number,
+    files: boolean,
+  ): Promise<{ ok: true; resumeAt: string | null; text: string } | { ok: false; error: string }> =>
+    ipcRenderer.invoke('chat:rewind', id, sessionId, cwd, index, text, nth, files),
   chatAnswer: (id: string, askId: string, a: ChatAnswer) => ipcRenderer.send('chat:answer', id, askId, a),
   chatInterrupt: (id: string) => ipcRenderer.send('chat:interrupt', id),
   chatMode: (id: string, mode: PermissionMode) => ipcRenderer.send('chat:mode', id, mode),

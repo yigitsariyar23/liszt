@@ -967,36 +967,50 @@ pre.out.error {
   color: var(--muted);
 }
 
-/* --- Editing a prompt, queued prompts --- */
+/* --- Rewinding to a prompt, editing it, queued prompts --- */
 
 .msg.user {
   position: relative;
 }
 
-.msg.user .edit {
+/* Beside the bubble's first line, so a long prompt has them in reach. The gap to the bubble is
+   padding, part of the bubble's hover, so the pointer does not lose them on the way over. */
+.msg.user .msg-actions {
   position: absolute;
-  top: 50%;
-  right: calc(100% + 8px);
-  transform: translateY(-50%);
+  top: 3px;
+  right: 100%;
+  display: flex;
+  gap: 4px;
+  padding-right: 8px;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s;
+}
+
+.msg.user:hover .msg-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.msg.user.queued .msg-actions {
+  display: none;
+}
+
+.msg.user .msg-actions button {
   padding: 2px 8px;
   border: 1px solid var(--border-strong);
   border-radius: 6px;
   font: 11px var(--sans);
   color: var(--muted);
   background: var(--panel);
-  opacity: 0;
-  transition: opacity 0.12s;
 }
 
-.msg.user:hover .edit {
-  opacity: 1;
-}
-
-.chat.busy .msg.user .edit {
+.msg.user .msg-actions button[hidden] {
   display: none;
 }
 
-.msg.user .edit:hover {
+.msg.user .msg-actions button:hover {
   color: var(--text);
   border-color: var(--text);
 }

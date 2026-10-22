@@ -5,7 +5,8 @@
 // the conversation without a turn. ↑ and ↓ bring back earlier prompts; a prompt sent while Claude
 // works shows queued until Claude takes it up. Above the composer sit Claude's to-do list, the
 // background tasks still running, and the permission prompts, questions and plans that wait for an
-// answer. A prompt can be edited, which rewinds the conversation to just before it.
+// answer. A prompt can be edited, which rewinds the conversation to just before it, or the
+// conversation rewound to just after its reply.
 
 import { Marked } from 'marked';
 import './chat.css';
@@ -13,6 +14,16 @@ import type { PermissionMode, PermissionUpdate } from '@anthropic-ai/claude-agen
 import { promptText } from '../shared/prompts';
 import type { ChatAnswer, ChatAsk, ChatImage, ChatInfo } from '../shared/types';
 import { h } from './dom';
+
+/**
+ * A prompt the chat shows: its place among them, its text, and how many before it had the same text.
+ * The place alone is not enough, as the chat and the transcript need not hold the same prompts.
+ */
+export interface PromptRef {
+  index: number;
+  text: string;
+  nth: number;
+}
 
 export interface ChatHost {
   /** `uuid` comes back on the reply that takes the message up. */
@@ -28,8 +39,11 @@ export interface ChatHost {
   /** Opens the model and effort menu under the model button. */
   pickModel(anchor: HTMLElement): void;
   stopTask(taskId: string): void;
-  /** Rewinds the conversation to just before the user's `index`th prompt, whose text was `text`. */
-  rewind(index: number, text: string): void;
+  /**
+   * Rewinds the conversation to just before one of the user's prompts. `edit`: the prompt is taken
+   * back to be sent again, so its text returns to the composer.
+   */
+  rewind(prompt: PromptRef, edit: boolean): void;
   answer(id: string, a: ChatAnswer): void;
   interrupt(): void;
   setMode(mode: PermissionMode): void;
@@ -728,10 +742,17 @@ export class ChatView {
   sent(text: string, images: string[] = []): HTMLElement {
     if (text) this.prompts.push(text);
     const el = h('div', 'msg user');
+    const actions = h('div', 'msg-actions');
+    const rewind = h('button', 'rewind', 'Rewind');
+    rewind.title = 'Rewind the conversation to just after this reply; what came later is forgotten';
+    rewind.addEventListener('click', () => this.rewindAfter(el));
     const edit = h('button', 'edit', 'Edit');
     edit.title = 'Edit this prompt: the conversation goes back to just before it';
     edit.addEventListener('click', () => this.editPrompt(el));
-    el.append(edit);
+    actions.append(rewind, edit);
+    // The last prompt has nothing after its reply to rewind.
+    el.addEventListener('mouseenter', () => (rewind.hidden = !this.promptAfter(el)));
+    el.append(actions);
     if (images.length) {
       const row = h('div', 'shots');
       for (const src of images) {
@@ -746,12 +767,38 @@ export class ChatView {
     return el;
   }
 
+  /** The prompts the chat shows, queued ones aside: Claude has not taken those up. */
+  private bubbles(): HTMLElement[] {
+    return [...this.thread.querySelectorAll<HTMLElement>('.msg.user:not(.queued)')];
+  }
+
+  private promptRef(el: HTMLElement): PromptRef | null {
+    const bubbles = this.bubbles();
+    const index = bubbles.indexOf(el);
+    if (index < 0) return null;
+    const text = (b: HTMLElement) => b.querySelector('.text')?.textContent ?? '';
+    const own = text(el);
+    return { index, text: own, nth: bubbles.slice(0, index).filter((b) => text(b) === own).length };
+  }
+
+  /** The prompt sent after this one, if any. */
+  private promptAfter(el: HTMLElement): HTMLElement | undefined {
+    const bubbles = this.bubbles();
+    const i = bubbles.indexOf(el);
+    return i < 0 ? undefined : bubbles[i + 1];
+  }
+
   /** Takes a prompt back: the conversation rewinds to just before it and its text returns to the composer. */
   private editPrompt(el: HTMLElement) {
-    const bubbles = [...this.thread.querySelectorAll('.msg.user')];
-    const index = bubbles.indexOf(el);
-    if (index < 0 || this.busy) return;
-    this.host.rewind(index, el.querySelector('.text')?.textContent ?? '');
+    const ref = this.promptRef(el);
+    if (ref) this.host.rewind(ref, true);
+  }
+
+  /** Keeps a prompt and its reply and forgets the rest: the conversation rewinds to just before the next prompt. */
+  private rewindAfter(el: HTMLElement) {
+    const next = this.promptAfter(el);
+    const ref = next && this.promptRef(next);
+    if (ref) this.host.rewind(ref, false);
   }
 
   // --- To-dos and background tasks -------------------------------------------------------------
@@ -1143,7 +1190,7 @@ export class ChatView {
       e.preventDefault();
       if (Date.now() - this.lastEsc < 600) {
         this.lastEsc = 0;
-        const last = [...this.thread.querySelectorAll<HTMLElement>('.msg.user')].pop();
+        const last = this.bubbles().pop();
         if (last) this.editPrompt(last);
       } else this.lastEsc = Date.now();
       return;
