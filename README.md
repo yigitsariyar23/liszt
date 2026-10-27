@@ -68,12 +68,31 @@ ditto release/mac-arm64/Liszt.app /Applications/Liszt.app
 - The development build (`npm start`) and the installed app share the same data folder, and only
   one of them can be open at a time.
 
+## Settings
+
+**Liszt → Settings…** (⌘,) or the gear at the right of the top bar opens a sheet over the window.
+Every change is saved at once, in `settings.json` in the data folder.
+
+- **Project folders**: the folders whose every folder is a pinned project (see **Tabs and splits**),
+  in the order their groups take. Add, remove and reorder them. Removing a folder leaves its
+  projects open as ordinary ones.
+- **Projects**: tabs in the top bar, or a tree in the left panel.
+- **New Claude sessions**: open in Claude Code's own terminal UI (the default), or as Liszt's chat
+  on the Agent SDK. Either way a session can be switched to the other view later.
+- **Shortcuts**: click a shortcut and press the new keys; it needs ⌘, ⌃ or ⌥, or a function key.
+  Esc cancels and ⌫ removes the shortcut. While Liszt waits for the keys, they don't run the
+  menu command they belong to. A shortcut that two commands share is marked on both. The menus
+  and the tooltips follow the new shortcuts.
+
 ## Shortcuts
+
+The defaults; Settings can change most of them.
 
 | Shortcut | Action |
 |---|---|
 | ⌘T / ⇧⌘T | New Claude session / new shell (opens in the focused split) |
 | ⌘D / ⇧⌘D | Open a new Claude session split to the right / below |
+| ⌥⌘T | New agent session: a Claude session in the project's next free agent checkout (see **Agents**) |
 | ⌘W | Close the focused session |
 | ⌃N | New project: a Claude session in `~/other-projects` that makes the project's folder (in any `~/*-projects`) and moves itself into its own tab |
 | ⌘O / ⇧⌘W | Add project / close project |
@@ -92,6 +111,39 @@ ditto release/mac-arm64/Liszt.app /Applications/Liszt.app
 
 - The top row holds projects; each project is a tab stack (as in Vivaldi). The open stack's
   sessions sit as tabs in the second row below. Background tabs keep running.
+- Every folder in `~/chaos-projects`, `~/other-projects` and `~/unity-projects` (the default
+  project folders; Settings changes them) is opened as a **pinned** project at the front of the row. Pinned projects cannot be closed. Liszt skips git worktrees
+  (agent and Studio checkouts), hidden and `_`-prefixed folders, `archive` and `studio`. Folders
+  made later show up when the window comes back to the front.
+  - Pinned projects are grouped by their folder: **Chaos**, **Other** and **Unity**, in that order,
+    ahead of every other tab. A pinned project cannot leave its folder's group, and no other
+    project can join one. A folder group can be renamed, recoloured and collapsed, but not ungrouped
+    or closed.
+- **View → Projects in Tabs / Sidebar** (⇧⌘L) moves the projects out of the top bar into the left
+  panel, where they take the Sessions panel's place (⌘L then shows and hides them). There they are
+  a tree: each group is a heading that folds its projects away, and projects in no group follow.
+  A row opens on click and has the project menu on right-click; its + starts a Claude session.
+  Clicking a group's heading folds its projects. Dragging to reorder or regroup is done in the tab
+  view. The top bar keeps only the panel buttons and Settings: projects and sessions are added
+  from the tree, the menus and the shortcuts.
+  - A project's sessions are its branches, so the session tab bar is hidden while the tree is in
+    sight. Its Liszt sessions come first in tab order, then sessions running or kept elsewhere for
+    its folder, the first six and a line for the rest. Double-clicking a project folds or unfolds
+    them, and a folded project shows how many it holds; the open project and projects with
+    sessions start unfolded.
+  - The search box and the Show (Active, In Liszt, Running, Unread, Pinned, Archived, All) and
+    Sort choices work as in the Sessions panel and share their settings with it. Shells show
+    under Active, In Liszt, Running and All. A search shows the projects whose name or sessions
+    match. Sessions whose folder belongs to no open project are listed last, under Other folders.
+  - Clicking a session shows it; right-click opens the session menu; × or a middle-click closes a
+    Liszt session.
+  - Several sessions are picked with ⌘-click or ⌃-click (one more or one less), ⇧-click (a run of
+    them, in the tree's order) or by dragging a box over them; with ⌘ or ⇧ held the box adds to
+    what is picked. Right-clicking one of the picked sessions opens a menu for all of them: mark
+    read or unread, close, archive or delete; picked shells can only be closed. Esc lets go.
+- Project tabs open folded, and every tab is folded again when Liszt starts.
+- A project with no icon of its own gets one drawn for it: its initials on a colour taken from the
+  folder name. **Detect Icon Again** replaces it once a real icon turns up.
 - Drag project tabs to reorder them; ⌘1…9 follows that order.
 - Projects can be collected into named, colored **groups**, like browser tab groups. The group's
   colored label sits in front of its projects, and the projects are underlined in the group's color.
@@ -117,6 +169,8 @@ ditto release/mac-arm64/Liszt.app /Applications/Liszt.app
   - **Add to Group / Move to Group / Remove from Group**, as described above.
   - **Fold** collapses the tab: only its icon and status dot remain, and the name shows in a tooltip
     on hover. **Unfold** opens it again; **Fold Others** folds the other projects, **Unfold All** opens them all.
+  - **New Agent Session** (⌥⌘T), see **Agents** below.
+  - **Open Terminal Here** opens a shell in the project's folder.
   - **Choose Icon… / Detect Icon Again**, **Reveal in Finder** and **Close Project**.
 - Drag a session tab (or a split's title):
   - Drop it in the tab row to reorder.
@@ -213,6 +267,8 @@ ditto release/mac-arm64/Liszt.app /Applications/Liszt.app
 ## How it works
 
 - `src/main/main.ts`: the window, ptys, git queries, the menu and the hook server.
+- Which repository a folder is in comes from `git rev-parse --show-toplevel --git-common-dir`, asked
+  once per folder and kept for the rest of the run.
 - Every Claude pane is a Claude Code background session. Liszt starts the session on Claude Code's
   background server with `claude --bg` (or `claude --bg --resume <sessionId>` for an ongoing
   conversation); the pane's terminal only runs `claude attach <id>`. That is why quitting with ⌘Q
@@ -274,6 +330,25 @@ ditto release/mac-arm64/Liszt.app /Applications/Liszt.app
   back with `claude attach <id>` when clicked. **New session** also stops the pane's old session.
 - The login shell environment (`.zprofile`, `.zshrc`) is read once, so panes see the terminal's
   PATH and variables even when the app is opened from Finder.
+
+## Agents
+
+- Several agents can work on one project at once, each in its own checkout of the repository, the
+  layout `/open-agents` uses: `<repo>-agent1`, `<repo>-agent2`… next to the repo's folder, on the
+  branches `agent/agent1`, `agent/agent2`…
+- A session in any worktree of a repository belongs to the project of the repository's main
+  checkout: it opens as a tab of that project, with its branch in the pane header, and Sessions lists
+  it under that project. Only a worktree that is open as a project of its own keeps its sessions.
+  A project opened at a subfolder of its repo takes the sessions in the same subfolder of the worktrees.
+- **New Agent Session** (⌥⌘T, or the project menu) opens a Claude session in the lowest-numbered
+  agent checkout that no session is working in, named `agentN` in `claude agents`:
+  - An existing one is brought up to the remote's default branch first, if it has no uncommitted
+    changes and no commits of its own; otherwise it is used as it is.
+  - A missing one is made with `git worktree add` from `origin/<default branch>` (after a fetch), on
+    `agent/agentN`, or on that branch as it is when it already exists. A folder with that name that
+    git doesn't know as a worktree is skipped.
+- Unlike task worktrees, agent checkouts sit outside the repo's folder, so Claude asks whether to
+  trust a new one the first time.
 
 ## Task board and Autopilot
 

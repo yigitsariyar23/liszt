@@ -26,6 +26,8 @@
       <button id="toggle-sidebar" class="tool" title="Changes (⌘B)"></button>
       <button id="toggle-sessions" class="tool" title="Sessions (⌘L)"></button>
       <button id="toggle-tasks" class="tool" title="Tasks (⌘J)"></button>
+      <span class="tool-sep"></span>
+      <button id="open-settings" class="tool" title="Settings (⌘,)"></button>
     </header>
     <div id="main">
       <aside id="sidebar">
@@ -43,6 +45,17 @@
             </div>
           </div>
           <div id="session-list"></div>
+        </section>
+        <section id="projects-view" class="side-view">
+          <div class="side-head"><span>Projects</span><span id="projects-count" class="muted"></span></div>
+          <div class="session-tools">
+            <input id="tree-search" type="search" placeholder="Search projects and sessions" autocomplete="off" spellcheck="false" />
+            <div class="session-selects">
+              <label class="muted">Show <button id="tree-filter"></button></label>
+              <label class="muted">Sort <button id="tree-sort"></button></label>
+            </div>
+          </div>
+          <div id="project-tree"></div>
         </section>
       </aside>
       <div id="center">

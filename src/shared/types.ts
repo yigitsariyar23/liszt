@@ -29,6 +29,8 @@ export interface PaneState {
   taskId?: string;
   /** Worktree branch, shown in the pane header. */
   branch?: string;
+  /** Name its background session starts with, as `claude agents` lists it (an agent's `agent2`). */
+  name?: string;
   /** Short id of the Claude Code background session this pane opens with `claude attach`. */
   bgId?: string;
   /** Claude finished a turn while the user was elsewhere, or the user marked the session unread. */
@@ -76,6 +78,8 @@ export interface ProjectIcon {
   image?: string;
   /** Chosen by hand; never replaced by detection. */
   custom?: boolean;
+  /** Drawn by Liszt because the project has no icon of its own; detection replaces it once one turns up. */
+  generated?: boolean;
 }
 
 export type GroupColor = 'grey' | 'blue' | 'green' | 'yellow' | 'orange' | 'red' | 'pink' | 'purple' | 'cyan';
@@ -107,6 +111,10 @@ export interface ProjectState {
   icon?: ProjectIcon;
   /** The tab shows only its icon and status. */
   folded?: boolean;
+  /** A folder of ~/chaos-projects, ~/other-projects or ~/unity-projects: always open, leading the tabs, never closed. */
+  pinned?: boolean;
+  /** Its sessions are shown under it in the project tree; unset, they are while it is open or has sessions. */
+  treeOpen?: boolean;
   /** Its group's projects always sit next to each other in `AppState.projects`. */
   groupId?: string;
   tasks: TaskState[];
@@ -135,6 +143,11 @@ export interface AppState {
   activeProjectId: string | null;
   /** What the left panel shows, Changes or Sessions, never both; null when it is closed. */
   sidebar: SidebarView | null;
+  /**
+   * Where the projects are listed: as tabs in the top bar, or as a tree of groups in the left panel,
+   * which then takes the Sessions panel's place.
+   */
+  projectList?: 'tabs' | 'sidebar';
   tasksPanel: boolean;
   fontSize: number;
   sessionFilter: SessionFilter;
@@ -178,6 +191,8 @@ export interface SpawnOptions {
   newProject?: boolean;
   /** Run a Claude session's own terminal UI instead of the chat. */
   terminal?: boolean;
+  /** Name a new session starts with (`--name`). */
+  name?: string;
   /** Resume a chat only up to this transcript entry: a rewind. */
   resumeAt?: string;
   /** Switched over as the turn ended: the background session may take a moment to show it is done. */
@@ -253,6 +268,22 @@ export interface TranscriptSession {
 
 export type SidebarView = 'changes' | 'sessions';
 
+/** What the Settings screen changes; kept by the main process in settings.json. */
+export interface Settings {
+  /** Folders whose every folder is a pinned project, grouped by folder, in this order. */
+  projectFolders: string[];
+  /** Shortcuts the user changed, by command id; an empty one takes the shortcut away. */
+  shortcuts: Record<string, string>;
+  /** How a new Claude session opens: Claude Code's own terminal UI, or Liszt's chat on the Agent SDK. */
+  claudeView: 'terminal' | 'chat';
+}
+
+/** The pinned project folders and the folders they sit in, in Settings' order. */
+export interface PinnedProjects {
+  roots: string[];
+  dirs: string[];
+}
+
 export type SessionFilter = 'active' | 'liszt' | 'running' | 'unread' | 'pinned' | 'archived' | 'all';
 
 export type SessionSort = 'status' | 'recent' | 'name' | 'project';
@@ -305,6 +336,19 @@ export interface GitInfo {
 }
 
 export type WorktreeResult = { ok: true; dir: string; cwd: string; branch: string } | { ok: false; error: string };
+
+/** The git checkout a folder is in, and the repository's main checkout. */
+export interface RepoOf {
+  /** Top of the checkout the folder is in: the main checkout or one of its worktrees. */
+  top: string;
+  /** The main checkout, the same for every worktree of the repository. */
+  root: string;
+  /** The folder relative to `top`; empty at the top. */
+  sub: string;
+  branch: string;
+}
+
+export type AgentResult = { ok: true; name: string; dir: string; cwd: string; branch: string } | { ok: false; error: string };
 
 /** Where a moved session's transcript now is, so the session resumes from its new folder. */
 export type MoveResult = { ok: true; transcript: string } | { ok: false; error: string };

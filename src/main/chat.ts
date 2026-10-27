@@ -123,6 +123,8 @@ export interface ChatStart {
   resume: boolean;
   prompt?: string;
   appendSystemPrompt?: string;
+  /** Name a new session starts with. */
+  name?: string;
   /** Resume only up to this transcript entry: a rewind. */
   resumeAt?: string;
 }
@@ -171,6 +173,7 @@ export async function startChat(o: ChatStart, send: (channel: string, ...args: u
       // Claude Code's terminal UI starts in auto mode; left out, the SDK starts where `claude -p` does.
       permissionMode: 'auto',
       systemPrompt: { type: 'preset', preset: 'claude_code', ...(o.appendSystemPrompt ? { append: o.appendSystemPrompt } : {}) },
+      ...(o.name ? { extraArgs: { name: o.name } } : {}),
       ...(o.resume ? { resume: o.sessionId, ...(o.resumeAt ? { resumeSessionAt: o.resumeAt } : {}) } : { sessionId: o.sessionId }),
       // Files Claude changes can be put back by a rewind.
       enableFileCheckpointing: true,

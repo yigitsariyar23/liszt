@@ -9,7 +9,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { EffortLevel, PermissionMode } from '@anthropic-ai/claude-agent-sdk';
 import { HOST_PROTOCOL, TERM_PROTOCOL } from '../shared/types';
+import { acceleratorOf, shortcutFor } from '../shared/shortcuts';
 import type {
+  AgentResult,
   AgentSession,
   ChatAnswer,
   ChatImage,
@@ -22,8 +24,11 @@ import type {
   MoveResult,
   NotifyKind,
   NotifyPrefs,
+  PinnedProjects,
+  Settings,
   ProjectIcon,
   ProjectKind,
+  RepoOf,
   SpawnOptions,
   SpawnResult,
   TranscriptSession,
@@ -271,13 +276,14 @@ function bashCommand(tool: unknown, input: unknown): string | undefined {
 const incubatorDir = () => path.join(os.homedir(), 'other-projects');
 const moveScript = () => path.join(userData(), 'liszt-move');
 
-/** The folders projects are kept in: ~/other-projects, ~/chaos-projects, ~/unity-projects… */
+/** The folders projects are kept in: every ~/*-projects folder and the ones chosen in Settings. */
 function projectRoots(): string[] {
   const home = os.homedir();
   const roots = fs
     .readdirSync(home, { withFileTypes: true })
     .filter((d) => d.isDirectory() && d.name.endsWith('-projects'))
     .map((d) => path.join(home, d.name));
+  for (const dir of settings.projectFolders) if (!roots.includes(dir)) roots.push(dir);
   return roots.includes(incubatorDir()) ? roots : [incubatorDir(), ...roots];
 }
 
@@ -331,6 +337,96 @@ ipcMain.handle('projects:incubator', () => {
   return incubatorDir();
 });
 
+// --- Settings ----------------------------------------------------------------------------------
+// What the Settings screen changes, kept in settings.json: the project folders, the shortcuts and
+// how a new Claude session opens.
+
+const settingsPath = () => path.join(userData(), 'settings.json');
+const DEFAULT_SETTINGS = (): Settings => ({
+  projectFolders: ['chaos-projects', 'other-projects', 'unity-projects'].map((r) => path.join(os.homedir(), r)),
+  shortcuts: {},
+  claudeView: 'terminal',
+});
+let settings: Settings = DEFAULT_SETTINGS();
+
+function loadSettings() {
+  try {
+    const saved = JSON.parse(fs.readFileSync(settingsPath(), 'utf8')) as Partial<Settings>;
+    settings = { ...DEFAULT_SETTINGS(), ...saved };
+  } catch {
+    settings = DEFAULT_SETTINGS();
+  }
+}
+
+ipcMain.handle('settings:get', () => settings);
+ipcMain.handle('settings:set', (_e, next: Settings) => {
+  settings = { projectFolders: [...next.projectFolders], shortcuts: { ...next.shortcuts }, claudeView: next.claudeView === 'chat' ? 'chat' : 'terminal' };
+  fs.writeFileSync(settingsPath(), JSON.stringify(settings, null, 2));
+  buildMenu();
+  return settings;
+});
+
+// A shortcut is recorded from the next key press, taken before the page and the menu see it, so
+// pressing a combination the menu already uses records it instead of running its command. Escape
+// cancels; Backspace or Delete alone clears the shortcut.
+let recording: ((accelerator: string | null) => void) | null = null;
+
+ipcMain.handle('settings:record', () => {
+  recording?.(null);
+  return new Promise<string | null>((resolve) => {
+    recording = resolve;
+  });
+});
+ipcMain.on('settings:record-cancel', () => {
+  recording?.(null);
+  recording = null;
+});
+
+function recordKey(event: Electron.Event, input: Electron.Input) {
+  if (!recording || input.type !== 'keyDown') return;
+  event.preventDefault();
+  const mods = input.meta || input.control || input.alt || input.shift;
+  let result: string | null | undefined;
+  if (input.code === 'Escape' && !mods) result = null;
+  else if ((input.code === 'Backspace' || input.code === 'Delete') && !mods) result = '';
+  else {
+    const accelerator = acceleratorOf({ code: input.code, meta: input.meta, control: input.control, alt: input.alt, shift: input.shift });
+    // A shortcut needs ⌘, ⌃ or ⌥, except for the function keys; a bare letter would be lost to typing.
+    if (accelerator && (input.meta || input.control || input.alt || /^F\d/.test(input.code))) result = accelerator;
+  }
+  if (result === undefined) return;
+  const done = recording;
+  recording = null;
+  done(result);
+}
+
+// --- Pinned projects ---------------------------------------------------------------------------
+// Every folder in the project folders chosen in Settings is a project of its own, always open at the
+// front of the tabs. Agent and Playable Studio checkouts are git worktrees of a project that is
+// already there, so they are left out, as are hidden folders, `_archive_`-style folders, `archive`
+// and Playable Studio's `studio` folder of Unity copies.
+
+function pinnedProjects(): PinnedProjects {
+  const dirs: string[] = [];
+  for (const root of settings.projectFolders) {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (!e.isDirectory() || /^[._]/.test(e.name) || e.name === 'archive' || e.name === 'studio') continue;
+      const dir = path.join(root, e.name);
+      if (fs.statSync(path.join(dir, '.git'), { throwIfNoEntry: false })?.isFile()) continue;
+      dirs.push(dir);
+    }
+  }
+  return { roots: settings.projectFolders, dirs };
+}
+
+ipcMain.handle('projects:pinned', () => pinnedProjects());
+
 // --- Terminals ---------------------------------------------------------------------------------
 // A shell pane runs the login shell in Liszt's terminal host (see terms.ts), so it outlives Liszt;
 // without the host it runs in a pty here. A Claude pane is a chat by default: its session runs
@@ -361,12 +457,15 @@ function nextSpawn(paneId: string): number {
 const newProjectArgs = (o: SpawnOptions, resume: boolean) =>
   o.newProject && !resume ? ['--append-system-prompt', newProjectPrompt(o.paneId)] : [];
 
+/** A resumed session keeps the name it has. */
+const nameArgs = (o: SpawnOptions, resume: boolean) => (o.name && !resume ? ['--name', o.name] : []);
+
 /** Auto mode's permission check reads moving a session's transcript as tampering, so the move script is allowed outright. */
 const paneSettings = (o: SpawnOptions) => hookSettings(o.paneId, o.newProject ? [`Bash(${moveCommand(o.paneId)} *)`] : []);
 
 /** Starts a background session for a pane; null when Claude Code would not. */
 async function startBackground(o: SpawnOptions, resume: boolean, sessionId: string, cwd: string): Promise<{ bgId: string; sessionId: string } | null> {
-  const args = ['--bg', '--settings', paneSettings(o), ...newProjectArgs(o, resume)];
+  const args = ['--bg', '--settings', paneSettings(o), ...newProjectArgs(o, resume), ...nameArgs(o, resume)];
   // A resumed session keeps its id.
   if (resume) args.push('--resume', sessionId);
   // `--` keeps a prompt that starts with a dash from being read as an option.
@@ -464,6 +563,7 @@ ipcMain.handle('pty:spawn', async (_e, o: SpawnOptions): Promise<SpawnResult> =>
         resume,
         prompt: resume ? undefined : o.prompt,
         appendSystemPrompt: o.newProject && !resume ? newProjectPrompt(o.paneId) : undefined,
+        name: resume ? undefined : o.name,
         resumeAt: resume ? o.resumeAt : undefined,
       },
       send,
@@ -526,7 +626,7 @@ ipcMain.handle('pty:spawn', async (_e, o: SpawnOptions): Promise<SpawnResult> =>
       ? [env.SHELL || '/bin/zsh', ['-l']]
       : bgId
         ? [claude, ['attach', bgId]]
-        : [claude, ['--settings', paneSettings(o), ...newProjectArgs(o, resume), resume ? '--resume' : '--session-id', sessionId]];
+        : [claude, ['--settings', paneSettings(o), ...newProjectArgs(o, resume), ...nameArgs(o, resume), resume ? '--resume' : '--session-id', sessionId]];
   if (o.kind === 'claude' && !bgId && o.prompt && !resume) args.push('--', o.prompt);
 
   let p: pty.IPty;
@@ -1293,16 +1393,86 @@ ipcMain.handle('worktree:remove', async (_e, project: string, dir: string): Prom
   }
 });
 
+// --- Agent worktrees ---------------------------------------------------------------------------
+// Parallel agents work in sibling checkouts of the repo, <repo>-agentN on agent/agentN, the layout
+// `/open-agents` uses. Their sessions belong to the repo's project, so they are found by repository.
+
+async function repoOf(dir: string): Promise<RepoOf | null> {
+  try {
+    const out = await runGit(dir, ['rev-parse', '--path-format=absolute', '--show-toplevel', '--git-common-dir', '--abbrev-ref', 'HEAD']);
+    const [top = '', common = '', branch = ''] = out.trim().split('\n');
+    // A bare repository's worktrees have no main checkout to belong to.
+    if (path.basename(common) !== '.git') return null;
+    const real = fs.realpathSync(top);
+    return { top: real, root: fs.realpathSync(path.dirname(common)), sub: path.relative(real, fs.realpathSync(dir)), branch };
+  } catch {
+    return null;
+  }
+}
+
+ipcMain.handle('repo:of', (_e, dirs: string[]) => Promise.all(dirs.map(repoOf)));
+
+/** The branch new agents start from: the remote's default branch when there is one. */
+async function agentBase(root: string): Promise<string> {
+  await runGit(root, ['fetch', '--quiet', 'origin'], 60_000).catch(() => {});
+  return (await runGit(root, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']).catch(() => 'HEAD')).trim() || 'HEAD';
+}
+
+/** Brings an idle agent's checkout up to the base, unless it holds work of its own. */
+async function refreshAgent(dir: string, base: string) {
+  const dirty = (await runGit(dir, ['status', '--porcelain']).catch(() => 'unknown')).trim();
+  const ahead = Number((await runGit(dir, ['rev-list', '--count', `${base}..HEAD`]).catch(() => '1')).trim());
+  if (dirty || ahead) return;
+  await runGit(dir, ['merge', '--ff-only', '--quiet', base], 10 * 60_000).catch(() => {});
+}
+
+/** The lowest agent checkout no session works in, made when it does not exist yet. */
+ipcMain.handle('agent:add', async (_e, project: string, busy: string[]): Promise<AgentResult> => {
+  try {
+    const repo = await repoOf(project);
+    if (!repo) return { ok: false, error: `${project} is not in a git repository.` };
+    const real = (d: string) => (fs.existsSync(d) ? fs.realpathSync(d) : d);
+    const taken = busy.map(real);
+    const inUse = (dir: string) => taken.some((d) => d === dir || d.startsWith(dir + path.sep));
+    const listed = (await runGit(repo.root, ['worktree', 'list', '--porcelain']))
+      .split('\n')
+      .filter((l) => l.startsWith('worktree '))
+      .map((l) => real(l.slice('worktree '.length)));
+    const base = await agentBase(repo.root);
+    for (let n = 1; n <= 99; n++) {
+      const name = `agent${n}`;
+      const dir = path.join(path.dirname(repo.root), `${path.basename(repo.root)}-${name}`);
+      if (inUse(dir)) continue;
+      if (listed.includes(dir)) {
+        await refreshAgent(dir, base);
+      } else {
+        // A folder git does not know is someone else's.
+        if (fs.existsSync(dir)) continue;
+        const branch = `agent/${name}`;
+        const exists = await runGit(repo.root, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]).then(() => true, () => false);
+        // LFS checkouts of big game repos can take minutes.
+        await runGit(repo.root, ['worktree', 'add', ...(exists ? [dir, branch] : ['-b', branch, dir, base])], 10 * 60_000);
+      }
+      const branch = (await runGit(dir, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+      return { ok: true, name, dir, cwd: path.join(dir, repo.sub), branch };
+    }
+    return { ok: false, error: 'Every agent checkout up to agent99 is in use.' };
+  } catch (err) {
+    return { ok: false, error: errorText(err) };
+  }
+});
+
 // --- Project icons -----------------------------------------------------------------------------
 // A project tab shows the project's own icon when one can be found: the app icon a Unity project
-// builds with, Godot's config/icon, an Xcode AppIcon, or a usual icon/logo/favicon file. Otherwise
-// the renderer draws a glyph for the project kind.
+// builds with, Godot's config/icon, an Xcode AppIcon, a web or extension manifest's icon, or a usual
+// icon/logo/favicon file. Otherwise Liszt draws one: the project's initials on a colour of its own.
 
 const ICON_FILES = [
   'build/icon.png', 'icon.png', 'icon.svg', 'logo.png', 'logo.svg', 'assets/icon.png', 'assets/logo.png',
   'resources/icon.png', 'app/icon.svg', 'app/icon.png', 'app/apple-icon.png', 'src/app/icon.svg', 'src/app/icon.png',
   'src/app/apple-icon.png', 'src-tauri/icons/icon.png', 'public/apple-touch-icon.png', 'public/icon.png', 'public/logo.png', 'public/logo192.png',
   'public/favicon.svg', 'public/favicon.png', 'static/favicon.png', 'favicon.svg', 'favicon.png',
+  'icons/icon.svg', 'icons/icon-512.png', 'icons/icon-192.png', 'icons/apple-touch-icon.png', 'icons/icon128.png',
   'app/src/main/res/mipmap-xxxhdpi/ic_launcher.png', 'android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png',
 ];
 
@@ -1379,6 +1549,49 @@ function loadIcon(file: string): string | undefined {
   return img.resize(width >= height ? { width: 64, quality: 'best' } : { height: 64, quality: 'best' }).toDataURL();
 }
 
+/** The largest icon a web app or browser extension manifest names. */
+function manifestIcon(dir: string): string | undefined {
+  for (const name of ['manifest.json', 'manifest.webmanifest', 'public/manifest.json', 'public/manifest.webmanifest']) {
+    let icons: unknown;
+    try {
+      icons = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')).icons;
+    } catch {
+      continue;
+    }
+    // An extension keys its icons by size; a web manifest lists them with a `sizes` string.
+    const list: Array<[number, string]> = Array.isArray(icons)
+      ? icons.filter((i) => typeof i?.src === 'string').map((i) => [parseInt(String(i.sizes ?? '0'), 10) || 0, i.src])
+      : icons && typeof icons === 'object'
+        ? Object.entries(icons as Record<string, unknown>).filter((e): e is [string, string] => typeof e[1] === 'string').map(([k, v]) => [parseInt(k, 10) || 0, v])
+        : [];
+    const best = list.sort((a, b) => b[0] - a[0])[0];
+    if (best) return path.join(dir, path.dirname(name), best[1].replace(/^\//, ''));
+  }
+  return undefined;
+}
+
+/** Up to two letters for a folder name: the first of each of its first two words, or its first. */
+function initials(name: string): string {
+  const words = name.split(/[-_\s.]+/).filter(Boolean);
+  const letters = words.length > 1 ? words.slice(0, 2).map((w) => w[0]) : [name[0] ?? '?'];
+  return letters.join('').toUpperCase();
+}
+
+/** A rounded square in a colour keyed on the folder name, with the project's initials on it. */
+function generatedIcon(dir: string): string {
+  const name = path.basename(dir);
+  let hash = 0;
+  for (const ch of name) hash = (hash * 31 + ch.charCodeAt(0)) | 0;
+  const hue = Math.abs(hash) % 360;
+  const text = initials(name);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="hsl(${hue} 62% 58%)"/><stop offset="1" stop-color="hsl(${(hue + 40) % 360} 58% 40%)"/></linearGradient></defs>
+<rect width="64" height="64" rx="14" fill="url(#g)"/>
+<text x="32" y="33" text-anchor="middle" dominant-baseline="central" font-family="-apple-system, system-ui, sans-serif" font-weight="700" font-size="${text.length > 1 ? 28 : 34}" fill="#fff">${text}</text>
+</svg>`;
+  return `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
+}
+
 async function detectProjectIcon(dir: string): Promise<ProjectIcon> {
   const kind = projectKind(dir);
   const candidates: string[] = [];
@@ -1389,15 +1602,22 @@ async function detectProjectIcon(dir: string): Promise<ProjectIcon> {
     if (m) candidates.push(path.join(dir, m[1]));
   }
   if (kind === 'apple') candidates.push((await appIconSet(dir)) ?? '');
-  candidates.push(...ICON_FILES.map((f) => path.join(dir, f)));
+  candidates.push(...ICON_FILES.map((f) => path.join(dir, f)), manifestIcon(dir) ?? '');
   for (const file of candidates.filter(Boolean)) {
     const image = loadIcon(file);
     if (image) return { kind, image };
   }
-  return { kind };
+  // A web or Flutter project can still ship an iOS app with an icon somewhere below it.
+  if (kind !== 'apple' && kind !== 'unity') {
+    const image = loadIcon((await appIconSet(dir)) ?? '');
+    if (image) return { kind, image };
+  }
+  return { kind, image: generatedIcon(dir), generated: true };
 }
 
-ipcMain.handle('project:icon', (_e, dir: string) => detectProjectIcon(dir).catch((): ProjectIcon => ({ kind: 'folder' })));
+ipcMain.handle('project:icon', (_e, dir: string) =>
+  detectProjectIcon(dir).catch((): ProjectIcon => ({ kind: 'folder', image: generatedIcon(dir), generated: true })),
+);
 
 ipcMain.handle('dialog:pickIcon', async () => {
   const r = await dialog.showOpenDialog(win!, {
@@ -1414,6 +1634,11 @@ ipcMain.on('clipboard:write', (_e, text: string) => clipboard.writeText(text));
 
 function buildMenu() {
   const cmd = (command: string) => () => send('menu', command);
+  /** A menu item for a command whose shortcut Settings can change. */
+  const item = (label: string, id: string): MenuItemConstructorOptions => {
+    const accelerator = shortcutFor(id, settings.shortcuts);
+    return { label, click: cmd(id), ...(accelerator ? { accelerator } : {}) };
+  };
   const projectKeys: MenuItemConstructorOptions[] = Array.from({ length: 9 }, (_, i) => ({
     label: `Project ${i + 1}`,
     accelerator: `CmdOrCtrl+${i + 1}`,
@@ -1422,40 +1647,58 @@ function buildMenu() {
     acceleratorWorksWhenHidden: true,
   }));
   const template: MenuItemConstructorOptions[] = [
-    { role: 'appMenu' },
+    {
+      label: app.name,
+      submenu: [
+        { role: 'about' },
+        { type: 'separator' },
+        item('Settings…', 'settings'),
+        { type: 'separator' },
+        { role: 'services' },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit' },
+      ],
+    },
     {
       label: 'File',
       submenu: [
-        { label: 'New Claude Pane', accelerator: 'CmdOrCtrl+T', click: cmd('new-claude') },
-        { label: 'New Shell Pane', accelerator: 'CmdOrCtrl+Shift+T', click: cmd('new-shell') },
-        { label: 'Split Right with New Session', accelerator: 'CmdOrCtrl+D', click: cmd('split-right') },
-        { label: 'Split Down with New Session', accelerator: 'CmdOrCtrl+Shift+D', click: cmd('split-down') },
-        { label: 'Close Session', accelerator: 'CmdOrCtrl+W', click: cmd('close-pane') },
+        item('New Claude Pane', 'new-claude'),
+        item('New Shell Pane', 'new-shell'),
+        item('New Agent Session', 'new-agent'),
+        item('Split Right with New Session', 'split-right'),
+        item('Split Down with New Session', 'split-down'),
+        item('Close Session', 'close-pane'),
         { type: 'separator' },
-        { label: 'New Project…', accelerator: 'Ctrl+N', registerAccelerator: false, click: cmd('new-project') },
-        { label: 'Add Project…', accelerator: 'CmdOrCtrl+O', click: cmd('add-project') },
-        { label: 'Close Project', accelerator: 'CmdOrCtrl+Shift+W', click: cmd('close-project') },
+        // Taken by the page instead, before the terminal, where ⌃N would step through the prompt history.
+        { ...item('New Project…', 'new-project'), registerAccelerator: false },
+        item('Add Project…', 'add-project'),
+        item('Close Project', 'close-project'),
       ],
     },
     { role: 'editMenu' },
     {
       label: 'View',
       submenu: [
-        { label: 'Toggle Changes', accelerator: 'CmdOrCtrl+B', click: cmd('toggle-sidebar') },
-        { label: 'Toggle Sessions', accelerator: 'CmdOrCtrl+L', click: cmd('toggle-sessions') },
-        { label: 'Toggle Tasks', accelerator: 'CmdOrCtrl+J', click: cmd('toggle-tasks') },
+        item('Toggle Changes', 'toggle-sidebar'),
+        item('Toggle Sessions', 'toggle-sessions'),
+        item('Projects in Tabs / Sidebar', 'toggle-project-list'),
+        item('Toggle Tasks', 'toggle-tasks'),
         { type: 'separator' },
-        { label: 'Next Session', accelerator: 'CmdOrCtrl+]', click: cmd('next-pane') },
-        { label: 'Previous Session', accelerator: 'CmdOrCtrl+[', click: cmd('prev-pane') },
-        { label: 'Next Project', accelerator: 'CmdOrCtrl+Shift+]', click: cmd('next-project') },
-        { label: 'Previous Project', accelerator: 'CmdOrCtrl+Shift+[', click: cmd('prev-project') },
+        item('Next Session', 'next-pane'),
+        item('Previous Session', 'prev-pane'),
+        item('Next Project', 'next-project'),
+        item('Previous Project', 'prev-project'),
         ...projectKeys,
         { type: 'separator' },
-        { label: 'Bigger Text', accelerator: 'CmdOrCtrl+=', click: cmd('font-up') },
-        { label: 'Smaller Text', accelerator: 'CmdOrCtrl+-', click: cmd('font-down') },
-        { label: 'Actual Size', accelerator: 'CmdOrCtrl+0', click: cmd('font-reset') },
+        item('Bigger Text', 'font-up'),
+        item('Smaller Text', 'font-down'),
+        item('Actual Size', 'font-reset'),
         { type: 'separator' },
-        { label: 'Switch Chat / Terminal', accelerator: 'CmdOrCtrl+E', click: cmd('toggle-view') },
+        item('Switch Chat / Terminal', 'toggle-view'),
         { type: 'separator' },
         { role: 'toggleDevTools' },
       ],
@@ -1513,6 +1756,7 @@ function createWindow() {
   });
   win.once('ready-to-show', () => (capture ? win?.showInactive() : win?.show()));
   win.webContents.on('did-finish-load', () => void pollAgents());
+  win.webContents.on('before-input-event', recordKey);
   void win.loadFile(path.join(__dirname, 'index.html'));
 
   // Test hook: LISZT_TEST_SCRIPT=<file.js> runs a script in the page once it has loaded.
@@ -1550,6 +1794,7 @@ app.whenReady().then(() => {
   writeClaudeSettings();
   writeMoveScript();
   loadNotifyPrefs();
+  loadSettings();
   hookUrl = startHookServer();
   // A socket path must stay short (macOS allows 104 bytes), so it sits right in userData.
   configureHost(path.join(userData(), `host-${HOST_PROTOCOL}.sock`), path.join(__dirname, 'host.js'));

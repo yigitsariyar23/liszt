@@ -25,9 +25,11 @@ import type {
   PaneState,
   ProjectGroup,
   ProjectState,
+  RepoOf,
   SessionFilter,
   SessionMark,
   SessionSort,
+  Settings,
   SidebarView,
   TaskState,
   TaskStatus,
@@ -38,6 +40,8 @@ import { h, iconEl } from './dom';
 import { ICONS, KIND_GLYPH } from './icons';
 import { leaf, panesIn, removePane, replacePane, splitPane, type Side } from './layout';
 import { closeMenu, dropdown, showMenu, type MenuAnchor, type MenuEntry } from './menu';
+import { openSettings } from './settings';
+import { matchesAccelerator, shortcutFor, shortcutLabel } from '../shared/shortcuts';
 
 declare global {
   interface Window {
@@ -132,6 +136,8 @@ interface PaneOptions {
   focus?: boolean;
   /** A New Project session, told how to move itself to its project's folder. */
   newProject?: boolean;
+  /** Name a new Claude session starts with, as `claude agents` lists it. */
+  name?: string;
   /** A command a new shell runs once it is up. */
   run?: string;
 }
@@ -177,10 +183,20 @@ let state: AppState = {
 };
 const views = new Map<string, PaneView>();
 const stages = new Map<string, HTMLElement>();
+/** The shortcuts chosen in Settings, by command id; loaded at boot and after each change. */
+let shortcuts: Record<string, string> = {};
+/** How a new Claude session opens, as chosen in Settings. */
+let claudeView: Settings['claudeView'] = 'terminal';
+/** A command's shortcut as the menu shows it, for hints in titles and buttons. */
+const keyHint = (id: string) => shortcutLabel(shortcutFor(id, shortcuts));
+/** ` (⌘T)` after a hint's text, or nothing when the command has no shortcut. */
+const withKey = (text: string, id: string) => (keyHint(id) ? `${text} (${keyHint(id)})` : text);
 let focusedPaneId: string | null = null;
 
 const byId = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const tabsEl = byId('tabs');
+const projectTreeEl = byId('project-tree');
+const projectsCountEl = byId('projects-count');
 const sessionBarEl = byId('sessionbar');
 const workspaceEl = byId('workspace');
 const poolEl = byId('pool');
@@ -211,37 +227,41 @@ const apLimit = dropdown(
 const sessionListEl = byId('session-list');
 const sessionsCountEl = byId('sessions-count');
 const sessionSearch = byId<HTMLInputElement>('session-search');
-const sessionFilter = dropdown<SessionFilter>(
-  byId('session-filter'),
-  [
-    ['active', 'Active'],
-    ['liszt', 'In Liszt'],
-    ['running', 'Running'],
-    ['unread', 'Unread'],
-    ['pinned', 'Pinned'],
-    ['archived', 'Archived'],
-    ['all', 'All'],
-  ],
-  (value) => {
-    state.sessionFilter = value;
-    renderSessions();
-    save();
-  },
-);
-const sessionSort = dropdown<SessionSort>(
-  byId('session-sort'),
-  [
-    ['status', 'Status'],
-    ['recent', 'Recent'],
-    ['name', 'Name'],
-    ['project', 'Project'],
-  ],
-  (value) => {
-    state.sessionSort = value;
-    renderSessions();
-    save();
-  },
-);
+const FILTER_OPTIONS: Array<[SessionFilter, string]> = [
+  ['active', 'Active'],
+  ['liszt', 'In Liszt'],
+  ['running', 'Running'],
+  ['unread', 'Unread'],
+  ['pinned', 'Pinned'],
+  ['archived', 'Archived'],
+  ['all', 'All'],
+];
+const SORT_OPTIONS: Array<[SessionSort, string]> = [
+  ['status', 'Status'],
+  ['recent', 'Recent'],
+  ['name', 'Name'],
+  ['project', 'Project'],
+];
+// The Sessions panel and the project tree share one Show and one Sort choice.
+const setSessionFilter = (value: SessionFilter) => {
+  state.sessionFilter = value;
+  sessionFilter.set(value);
+  treeFilter.set(value);
+  renderSessions();
+  save();
+};
+const setSessionSort = (value: SessionSort) => {
+  state.sessionSort = value;
+  sessionSort.set(value);
+  treeSort.set(value);
+  renderSessions();
+  save();
+};
+const sessionFilter = dropdown<SessionFilter>(byId('session-filter'), FILTER_OPTIONS, setSessionFilter);
+const sessionSort = dropdown<SessionSort>(byId('session-sort'), SORT_OPTIONS, setSessionSort);
+const treeSearch = byId<HTMLInputElement>('tree-search');
+const treeFilter = dropdown<SessionFilter>(byId('tree-filter'), FILTER_OPTIONS, setSessionFilter);
+const treeSort = dropdown<SessionSort>(byId('tree-sort'), SORT_OPTIONS, setSessionSort);
 
 /** Where a right-click happened, for the menu it opens. */
 const pointer = (e: MouseEvent): MenuAnchor => ({ x: e.clientX, y: e.clientY });
@@ -309,7 +329,7 @@ function createView(project: ProjectState, pane: PaneState): PaneView {
   const unsplitBtn = iconEl(ICONS.unsplit, 'icon unsplit');
   unsplitBtn.title = 'Take out of the split (the session keeps running as a tab)';
   const closeBtn = iconEl(ICONS.close, 'icon');
-  closeBtn.title = 'Close session (⌘W)';
+  closeBtn.title = withKey('Close session', 'close-pane');
   head.append(iconEl(pane.kind === 'claude' ? ICONS.claude : ICONS.shell, 'pane-kind'), titleEl);
   if (pane.branch) {
     const branch = h('span', 'branch-tag', `⎇ ${pane.branch}`);
@@ -491,10 +511,8 @@ function paintView(v: PaneView) {
     btn.innerHTML = terminal ? ICONS.chat : ICONS.shell;
     btn.classList.toggle('pending', Boolean(v.switchPending));
     btn.title = v.switchPending
-      ? `Goes on in the ${to} once this turn ends (⌘E to stay)`
-      : terminal
-        ? 'Show as chat (⌘E)'
-        : 'Show in the terminal (⌘E)';
+      ? `Goes on in the ${to} once this turn ends${keyHint('toggle-view') ? ` (${keyHint('toggle-view')} to stay)` : ''}`
+      : withKey(terminal ? 'Show as chat' : 'Show in the terminal', 'toggle-view');
   }
   if (terminal) scheduleFit(v);
 }
@@ -852,6 +870,7 @@ async function spawn(v: PaneView, resume: boolean, prompt?: string, resumeAt?: s
     transcript: v.pane.transcript,
     attach: resume ? v.pane.bgId : undefined,
     newProject: v.pane.newProject,
+    name: v.pane.name,
     terminal: v.pane.kind === 'claude' && inTerminal(v),
     resumeAt,
     handover,
@@ -1264,8 +1283,9 @@ function stagePlaceholder(project: ProjectState): HTMLElement {
   const empty = h('div', 'placeholder');
   empty.append(h('div', 'placeholder-title', project.name), h('p', undefined, project.path));
   const row = h('div', 'row');
-  const claudeBtn = h('button', 'secondary', 'New Claude session · ⌘T');
-  const shellBtn = h('button', 'secondary', 'New shell · ⇧⌘T');
+  const hinted = (text: string, id: string) => (keyHint(id) ? `${text} · ${keyHint(id)}` : text);
+  const claudeBtn = h('button', 'secondary', hinted('New Claude session', 'new-claude'));
+  const shellBtn = h('button', 'secondary', hinted('New shell', 'new-shell'));
   claudeBtn.addEventListener('click', () => addPane('claude', project));
   shellBtn.addEventListener('click', () => addPane('shell', project));
   row.append(claudeBtn, shellBtn);
@@ -1400,6 +1420,8 @@ function addPane(kind: PaneKind, project = activeProject(), opts: PaneOptions = 
     branch: opts.branch,
     bgId: opts.bgId,
     newProject: opts.newProject || undefined,
+    name: opts.name,
+    terminal: (kind === 'claude' && claudeView === 'terminal') || undefined,
   };
   // New tabs open next to the focused one, like a browser; task sessions line up at the end.
   const at = opts.taskId ? -1 : project.panes.findIndex((p) => p.id === project.activePaneId);
@@ -1558,7 +1580,7 @@ function renderSessionBar() {
     const tab = h('div', 'stab');
     tab.draggable = true;
     const close = iconEl(ICONS.close, 'stab-close');
-    close.title = 'Close session (⌘W)';
+    close.title = withKey('Close session', 'close-pane');
     const title = h('span', 'stab-title');
     tab.append(iconEl(pane.kind === 'claude' ? ICONS.claude : ICONS.shell, `stab-icon ${pane.kind}`), title, h('span', 'dot'), close);
     tab.addEventListener('click', (e) => {
@@ -1598,7 +1620,7 @@ function renderSessionBar() {
     return tab;
   });
   const add = iconEl(ICONS.plus, 'stab-add');
-  add.title = 'New Claude session (⌘T) · split with ⌘D';
+  add.title = withKey('New Claude session', 'new-claude') + (keyHint('split-right') ? ` · split with ${keyHint('split-right')}` : '');
   add.addEventListener('click', () => addPane('claude', project));
   sessionBarEl.replaceChildren(...tabs, add);
   paintSessionTabs();
@@ -1689,8 +1711,50 @@ function groupStatus(projects: ProjectState[]): string {
   return ['attention', 'running', 'waiting', 'unread'].find((s) => all.includes(s)) ?? '';
 }
 
+// Pinned projects are grouped by the project folder they sit in, one group per folder chosen in
+// Settings, leading the row in Settings' order. A pinned project always goes back to its folder's
+// group, and no other project can join one. A new folder group takes a name and colour of its own,
+// which the group menu can change.
+const ROOT_GROUPS: Record<string, [string, GroupColor]> = {
+  'chaos-projects': ['Chaos', 'orange'],
+  'other-projects': ['Other', 'blue'],
+  'unity-projects': ['Unity', 'green'],
+};
+const isRootGroup = (group: ProjectGroup) => group.id.startsWith('root:');
+const parentDir = (dir: string) => dir.slice(0, dir.lastIndexOf('/'));
+/** The project folders from Settings, in order; set by `syncPinned`. */
+let pinnedRoots: string[] = [];
+
+function pinGroups() {
+  for (const p of state.projects) {
+    if (!p.pinned) {
+      if (p.groupId?.startsWith('root:')) p.groupId = undefined;
+      continue;
+    }
+    const root = folderName(parentDir(p.path));
+    const id = `root:${root}`;
+    if (!state.groups.some((g) => g.id === id)) {
+      const used = new Set(state.groups.map((g) => g.color));
+      const [name, color] = ROOT_GROUPS[root] ?? [
+        root.replace(/-projects$/, '').replace(/^./, (c) => c.toUpperCase()),
+        (GROUP_COLORS.find(([c]) => !used.has(c)) ?? GROUP_COLORS[0])[0],
+      ];
+      state.groups.push({ id, name, color });
+    }
+    p.groupId = id;
+  }
+  const rank = (p: ProjectState) => {
+    if (!p.pinned) return pinnedRoots.length + 1;
+    const i = pinnedRoots.indexOf(parentDir(p.path));
+    return i < 0 ? pinnedRoots.length : i;
+  };
+  // A stable sort, so projects keep their order inside each group and after them.
+  state.projects.sort((a, b) => rank(a) - rank(b));
+}
+
 /** Keeps each group's projects together where its first one sits, and drops groups left empty. */
 function normalizeGroups() {
+  pinGroups();
   const known = new Set(state.groups.map((g) => g.id));
   const placed = new Set<string>();
   const order: ProjectState[] = [];
@@ -1706,15 +1770,23 @@ function normalizeGroups() {
   state.groups = state.groups.filter((g) => placed.has(g.id));
 }
 
+const inSidebar = () => state.projectList === 'sidebar';
+
 function renderTabs() {
   // Replacing the tab being dragged or renamed would cancel that; rebuild once it ends.
-  if (dragProjectId || dragGroupId || tabsEl.querySelector('[contenteditable="true"]')) {
+  if (dragProjectId || dragGroupId || document.querySelector('#tabs [contenteditable="true"], #project-tree [contenteditable="true"]')) {
     tabsDirty = true;
     return;
   }
   tabsDirty = false;
   projectTabEls.clear();
   groupTabEls.clear();
+  if (inSidebar()) {
+    tabsEl.replaceChildren();
+    renderProjectTree();
+    return;
+  }
+  projectTreeEl.replaceChildren();
   const els: HTMLElement[] = [];
   for (let i = 0; i < state.projects.length; ) {
     const group = groupOf(state.projects[i]);
@@ -1734,11 +1806,13 @@ function projectTab(p: ProjectState): HTMLElement {
   tab.draggable = true;
   tab.title = `${p.name}\n${p.path}\nDouble-click to ${p.folded ? 'unfold' : 'fold'}, drag to reorder or into a group, right-click for more`;
   const close = iconEl(ICONS.close, 'tab-close');
-  close.title = 'Close project (⇧⌘W)';
+  close.title = withKey('Close project', 'close-project');
   const name = h('span', 'tab-name', p.name);
   tab.append(projectIcon(p), name);
   if (p.panes.length > 1) tab.append(h('span', 'tab-count', String(p.panes.length)));
-  tab.append(h('span', `dot ${projectStatus(p)}`), close);
+  tab.append(h('span', `dot ${projectStatus(p)}`));
+  // A pinned project cannot be closed, so its tab has no close button.
+  if (!p.pinned) tab.append(close);
   tab.addEventListener('click', (e) => {
     if (close.contains(e.target as Node)) closeProject(p);
     else if (!name.isContentEditable) activateProject(p.id);
@@ -1765,6 +1839,324 @@ function projectTab(p: ProjectState): HTMLElement {
   );
   projectTabEls.set(p.id, tab);
   return tab;
+}
+
+// In the left panel the projects form a tree: each group is a heading that folds its projects away,
+// and the projects in no group follow as plain rows. Under each project its sessions are branches,
+// so the session tab bar is not needed while the tree is in sight: the Liszt sessions in tab order,
+// then the ones running or kept elsewhere, chosen by the same Show and Sort as the Sessions panel.
+// Sessions whose folder belongs to no open project close the tree. A project row opens, renames
+// and has the same menu as a tab; reordering and regrouping by dragging stay with the tabs.
+
+interface TreeSession {
+  title: string;
+  dot: string;
+  chip: string;
+  kind: PaneKind;
+  view?: PaneView;
+  row?: SessionRow;
+}
+
+/** Sessions shown under a project before a "more" line, besides its own Liszt sessions. */
+const TREE_OUTSIDE_LIMIT = 6;
+/** Projects whose every outside session is shown; '' is the closing "other folders" list. */
+const treeShowAll = new Set<string>();
+
+function treeSessions(terms: string[]): { byProject: Map<string, TreeSession[]>; elsewhere: TreeSession[] } {
+  const matches = (text: string) => terms.every((t) => fold(text).includes(t));
+  const rows = sessionRows().filter(FILTERS[state.sessionFilter]);
+  const ofPane = new Map(rows.filter((r) => r.view).map((r) => [r.view!.pane.id, r]));
+  // Shells have no session row; they show while the filter takes in what runs in Liszt.
+  const shells = ['active', 'liszt', 'running', 'all'].includes(state.sessionFilter);
+  const byProject = new Map<string, TreeSession[]>();
+  for (const p of state.projects) {
+    const named = !terms.length || matches(`${p.name} ${p.path}`);
+    const list: TreeSession[] = [];
+    for (const pane of p.panes) {
+      const v = views.get(pane.id);
+      if (!v) continue;
+      const r = ofPane.get(pane.id);
+      if (pane.kind === 'claude' ? !r : !shells) continue;
+      if (!named && !matches(`${displayTitle(v)} ${r?.detail ?? ''} ${pane.branch ?? ''}`)) continue;
+      list.push({ title: displayTitle(v), dot: dotClass(v), chip: r && v.status !== 'idle' ? chipText(v) : '', kind: pane.kind, view: v, row: r });
+    }
+    byProject.set(p.id, list);
+  }
+  const elsewhere: TreeSession[] = [];
+  const outside = rows.filter((r) => !r.view).sort((a, b) => Number(b.pinned) - Number(a.pinned) || SORTS[state.sessionSort](a, b));
+  for (const r of outside) {
+    const p = projectFor(r.cwd);
+    if (terms.length && !matches(`${r.title} ${r.where} ${r.detail}${p ? ` ${p.name} ${p.path}` : ''}`)) continue;
+    const item: TreeSession = { title: r.title, dot: r.dot, chip: r.chip[1], kind: 'claude', row: r };
+    (p ? byProject.get(p.id)! : elsewhere).push(item);
+  }
+  return { byProject, elsewhere };
+}
+
+function renderProjectTree() {
+  const terms = fold(treeSearch.value).split(/\s+/).filter(Boolean);
+  const { byProject, elsewhere } = treeSessions(terms);
+  // While searching, a project shows when its name or one of its sessions matches.
+  const shown = (p: ProjectState) =>
+    !terms.length || byProject.get(p.id)!.length > 0 || terms.every((t) => fold(`${p.name} ${p.path}`).includes(t));
+  const els: HTMLElement[] = [];
+  for (let i = 0; i < state.projects.length; ) {
+    const group = groupOf(state.projects[i]);
+    if (!group) {
+      const p = state.projects[i++];
+      if (shown(p)) els.push(...treeProject(p, byProject.get(p.id)!, terms.length > 0));
+      continue;
+    }
+    const members: ProjectState[] = [];
+    while (state.projects[i]?.groupId === group.id) members.push(state.projects[i++]);
+    const visible = members.filter(shown);
+    if (visible.length) els.push(treeGroup(group, visible, byProject, terms.length > 0));
+  }
+  if (elsewhere.length) {
+    els.push(h('div', 'ptree-elsewhere', 'Other folders'));
+    els.push(treeBranch('', elsewhere));
+  }
+  if (!els.length) els.push(h('div', 'side-note', 'Nothing matches.'));
+  projectTreeEl.replaceChildren(...els);
+  projectsCountEl.textContent = String(state.projects.length);
+  // Shift-click ranges follow the tree's order; a session the tree no longer shows leaves the selection.
+  shownSessionIds = [...projectTreeEl.querySelectorAll<HTMLElement>('.ptree-session')].map((el) => el.dataset.key!);
+  for (const key of selectedSessions) if (!shownSessionIds.includes(key)) selectedSessions.delete(key);
+  if (marquee) paintMarquee();
+  // Scrolled to only when the open project or session changes, so redraws leave the scroll alone.
+  const here = `${state.activeProjectId}:${focusedPaneId}`;
+  if (here !== treeScrolledTo) {
+    treeScrolledTo = here;
+    projectTreeEl.querySelector('.ptree-session.current, .ptree-row.active')?.scrollIntoView({ block: 'nearest' });
+  }
+}
+
+let treeScrolledTo = '';
+
+/** A tree session's key in the selection: its Claude session id, or its pane for a shell. */
+const treeKey = (s: TreeSession) => (s.row ? s.row.sessionId : `pane:${s.view!.pane.id}`);
+
+/**
+ * The selected tree sessions, as session rows and as shells. Right-clicking one of several opens
+ * the menu for all of them.
+ */
+function selectedInTree(): { rows: SessionRow[]; shells: PaneView[] } {
+  const rows = sessionRows().filter((r) => selectedSessions.has(r.sessionId));
+  const shells = [...selectedSessions].flatMap((key) => (key.startsWith('pane:') ? (views.get(key.slice(5)) ?? []) : []));
+  return { rows, shells };
+}
+
+// Marquee selection: a drag that starts anywhere in the tree draws a box, and the sessions it
+// touches are selected, added to the selection when ⌘ or ⇧ is held. A press that does not move is
+// left to be a click; the click that ends a drag is swallowed.
+interface Marquee {
+  x: number;
+  /** Where the drag started, in the tree's scrolled content. */
+  y: number;
+  toX: number;
+  toY: number;
+  base: Set<string>;
+  box?: HTMLElement;
+}
+let marquee: Marquee | null = null;
+let swallowClick = false;
+
+function paintMarquee() {
+  const m = marquee!;
+  const tree = projectTreeEl.getBoundingClientRect();
+  const top = Math.min(m.y, m.toY + projectTreeEl.scrollTop);
+  const bottom = Math.max(m.y, m.toY + projectTreeEl.scrollTop);
+  const left = Math.min(m.x, m.toX);
+  const right = Math.max(m.x, m.toX);
+  if (!m.box?.isConnected) {
+    m.box = h('div', 'ptree-marquee');
+    projectTreeEl.append(m.box);
+  }
+  Object.assign(m.box.style, {
+    top: `${top}px`,
+    height: `${bottom - top}px`,
+    left: `${left - tree.left}px`,
+    width: `${right - left}px`,
+  });
+  selectedSessions.clear();
+  for (const key of m.base) selectedSessions.add(key);
+  for (const el of projectTreeEl.querySelectorAll<HTMLElement>('.ptree-session')) {
+    const r = el.getBoundingClientRect();
+    const elTop = r.top - tree.top + projectTreeEl.scrollTop;
+    const hit = elTop < bottom && elTop + r.height > top && r.left < right && r.right > left;
+    if (hit) selectedSessions.add(el.dataset.key!);
+    el.classList.toggle('selected', selectedSessions.has(el.dataset.key!));
+  }
+}
+
+projectTreeEl.addEventListener('mousedown', (e) => {
+  if (e.button !== 0 || e.ctrlKey || (e.target as HTMLElement).isContentEditable) return;
+  const tree = projectTreeEl.getBoundingClientRect();
+  // A press on the scrollbar scrolls.
+  if (e.clientX > tree.left + projectTreeEl.clientWidth) return;
+  const start = { x: e.clientX, y: e.clientY - tree.top + projectTreeEl.scrollTop };
+  const additive = e.metaKey || e.shiftKey;
+  const move = (ev: MouseEvent) => {
+    if (!marquee) {
+      if (Math.hypot(ev.clientX - e.clientX, ev.clientY - e.clientY) < 5) return;
+      marquee = { ...start, toX: ev.clientX, toY: ev.clientY - tree.top, base: additive ? new Set(selectedSessions) : new Set() };
+    }
+    marquee.toX = ev.clientX;
+    marquee.toY = ev.clientY - tree.top;
+    // Near the top or bottom edge the tree scrolls, so the box can reach past what is in sight.
+    if (ev.clientY < tree.top + 16) projectTreeEl.scrollTop -= 12;
+    else if (ev.clientY > tree.bottom - 16) projectTreeEl.scrollTop += 12;
+    paintMarquee();
+  };
+  const up = () => {
+    window.removeEventListener('mousemove', move);
+    window.removeEventListener('mouseup', up);
+    if (!marquee) return;
+    marquee.box?.remove();
+    marquee = null;
+    swallowClick = true;
+    setTimeout(() => (swallowClick = false));
+    selectionAnchor = shownSessionIds.find((key) => selectedSessions.has(key));
+    renderSessions();
+  };
+  window.addEventListener('mousemove', move);
+  window.addEventListener('mouseup', up);
+});
+projectTreeEl.addEventListener(
+  'click',
+  (e) => {
+    if (!swallowClick) return;
+    swallowClick = false;
+    e.stopPropagation();
+    e.preventDefault();
+  },
+  true,
+);
+
+function treeGroup(group: ProjectGroup, members: ProjectState[], byProject: Map<string, TreeSession[]>, searching: boolean): HTMLElement {
+  const box = h('div', `ptree-group${group.collapsed ? ' collapsed' : ''}`);
+  box.style.setProperty('--group', groupColor(group));
+  const head = h('div', 'ptree-head');
+  const name = h('span', 'tgroup-name', group.name || groupLabel(group));
+  head.append(h('span', 'ptree-swatch'), name);
+  head.append(h('span', 'ptree-count', String(members.length)));
+  // The open project stays in sight when its group collapses; the dot speaks for the hidden ones.
+  const shown = group.collapsed && !searching ? members.filter((p) => p.id === state.activeProjectId) : members;
+  const status = group.collapsed ? groupStatus(members.filter((p) => !shown.includes(p))) : '';
+  if (status) head.append(h('span', `dot ${status}`));
+  head.title = `${groupLabel(group)}\nClick to ${group.collapsed ? 'expand' : 'collapse'}, right-click for more`;
+  head.addEventListener('click', () => name.isContentEditable || toggleGroup(group));
+  head.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    void groupMenu(group, pointer(e));
+  });
+  groupTabEls.set(group.id, head);
+  box.append(head, ...shown.flatMap((p) => treeProject(p, byProject.get(p.id)!, searching)));
+  return box;
+}
+
+/** A project's row, followed by its sessions while it is expanded. */
+function treeProject(p: ProjectState, sessions: TreeSession[], searching: boolean): HTMLElement[] {
+  const open = searching ? sessions.length > 0 : (p.treeOpen ?? (p.id === state.activeProjectId || p.panes.length > 0));
+  const row = h('div', `ptree-row${p.id === state.activeProjectId ? ' active' : ''}`);
+  row.title = `${p.name}\n${p.path}\n${sessions.length ? `Double-click to ${open ? 'fold' : 'unfold'} its sessions, right` : 'Right'}-click for more`;
+  const name = h('span', 'tab-name', p.name);
+  const add = iconEl(ICONS.plus, 'ptree-add');
+  add.title = withKey('New Claude session', 'new-claude');
+  row.append(projectIcon(p), name, add);
+  // Folded, the count says how many sessions are tucked away under it.
+  if (!open && sessions.length) row.append(h('span', 'tab-count', String(sessions.length)));
+  row.append(h('span', `dot ${projectStatus(p)}`));
+  row.addEventListener('click', (e) => {
+    if (name.isContentEditable) return;
+    // The first click opens the project and redraws the tree, so the second one lands on a new
+    // row and no dblclick fires; the click's own count tells a double-click instead.
+    if (e.detail === 2 && !add.contains(e.target as Node)) {
+      if (!sessions.length) return;
+      p.treeOpen = !open;
+      renderTabs();
+      return save();
+    }
+    if (add.contains(e.target as Node)) {
+      if (state.activeProjectId !== p.id) activateProject(p.id);
+      return void addPane('claude', p);
+    }
+    activateProject(p.id);
+  });
+  row.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    void projectMenu(p, pointer(e));
+  });
+  projectTabEls.set(p.id, row);
+  return open && sessions.length ? [row, treeBranch(p.id, sessions)] : [row];
+}
+
+/** Session rows under a project: its own first, then a few of the outside ones and a line for the rest. */
+function treeBranch(key: string, sessions: TreeSession[]): HTMLElement {
+  const box = h('div', 'ptree-sessions');
+  const own = sessions.filter((s) => s.view);
+  const outside = sessions.filter((s) => !s.view);
+  const all = treeShowAll.has(key);
+  const listed = all ? outside : outside.slice(0, TREE_OUTSIDE_LIMIT);
+  box.append(...[...own, ...listed].map(treeSession));
+  if (outside.length > TREE_OUTSIDE_LIMIT) {
+    const more = h('div', 'ptree-more', all ? 'Show fewer' : `${outside.length - TREE_OUTSIDE_LIMIT} more…`);
+    more.addEventListener('click', () => {
+      if (all) treeShowAll.delete(key);
+      else treeShowAll.add(key);
+      renderTabs();
+    });
+    box.append(more);
+  }
+  return box;
+}
+
+function treeSession(s: TreeSession): HTMLElement {
+  const v = s.view;
+  const el = h('div', 'ptree-session');
+  const key = treeKey(s);
+  el.dataset.key = key;
+  if (selectedSessions.has(key)) el.classList.add('selected');
+  const onScreen = Boolean(v && v.project.id === state.activeProjectId);
+  if (v && onScreen && v.pane.id === focusedPaneId) el.classList.add('current');
+  if (v && onScreen && isVisible(v)) el.classList.add('visible');
+  if (!v) el.classList.add('outside');
+  if (s.row && !s.row.open) el.classList.add('gone');
+  if (s.dot === 'unread') el.classList.add('unread');
+  el.append(iconEl(s.kind === 'claude' ? ICONS.claude : ICONS.shell, `stab-icon ${s.kind}`), h('span', `dot ${s.dot}`));
+  if (s.row?.pinned) el.append(iconEl(ICONS.pin, 'srow-pin'));
+  el.append(h('span', 'ptree-session-title', s.title));
+  if (s.chip) el.append(h('span', 'ptree-session-chip', s.chip));
+  const close = iconEl(ICONS.close, 'ptree-close');
+  if (v) {
+    close.title = withKey('Close session', 'close-pane');
+    el.append(close);
+  }
+  el.title = v
+    ? `${s.title}${v.pane.branch ? `\n⎇ ${v.pane.branch}` : ''}\nRight-click for more`
+    : `${s.title}\n${s.row?.where ?? ''}\n${s.row?.tooltip ?? ''}`;
+  el.addEventListener('click', (e) => {
+    if (v && close.contains(e.target as Node)) return void closePane(v);
+    if (e.shiftKey) return selectRange(key);
+    if (e.metaKey) return toggleSelected(key);
+    clearSelection();
+    if (v) return revealPane(v);
+    s.row?.open?.();
+  });
+  el.addEventListener('auxclick', (e) => e.button === 1 && v && closePane(v));
+  el.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    // On a Mac ⌃-click arrives as a right-click; here it picks the session, as ⌘-click does.
+    if (e.ctrlKey && e.button === 0) return toggleSelected(key);
+    if (selectedSessions.has(key) && selectedSessions.size > 1) {
+      const { rows, shells } = selectedInTree();
+      return void sessionRowsMenu(rows, pointer(e), shells);
+    }
+    clearSelection();
+    if (v) void sessionMenu(v, 'head', pointer(e));
+    else if (s.row) void sessionRowMenu(s.row, pointer(e));
+  });
+  return el;
 }
 
 /** A group's tab followed by its projects' tabs, or only the open one of them while it is collapsed. */
@@ -1939,7 +2331,7 @@ function renameGroup(group: ProjectGroup) {
 }
 
 function closeGroup(group: ProjectGroup) {
-  const members = groupMembers(group);
+  const members = groupMembers(group).filter((p) => !p.pinned);
   const busy = members.filter(projectBusy).map((p) => p.name);
   if (busy.length && !confirm(`${busy.join(', ')} ${busy.length === 1 ? 'has' : 'have'} sessions still working. Close the group's projects?`)) return;
   for (const p of members) closeProject(p, { ask: false });
@@ -1955,11 +2347,16 @@ async function groupMenu(group: ProjectGroup, at: MenuAnchor) {
         submenu: GROUP_COLORS.map(([color, label, css]) => ({ label, id: `color:${color}`, swatch: css, checked: color === group.color })),
       },
       { label: group.collapsed ? 'Expand' : 'Collapse', id: 'collapse', key: 'e' },
-      'separator',
-      { label: 'Add Project to Group…', id: 'add', key: 'p' },
-      'separator',
-      { label: 'Ungroup', id: 'ungroup', key: 'u' },
-      { label: 'Close Group', id: 'close', key: 'c' },
+      // A folder's group holds exactly that folder's projects, which are always open.
+      ...(isRootGroup(group)
+        ? []
+        : ([
+            'separator',
+            { label: 'Add Project to Group…', id: 'add', key: 'p' },
+            'separator',
+            { label: 'Ungroup', id: 'ungroup', key: 'u' },
+            { label: 'Close Group', id: 'close', key: 'c' },
+          ] as MenuEntry[])),
     ],
     at,
   );
@@ -2022,10 +2419,10 @@ async function detectIcon(project: ProjectState) {
 
 async function projectMenu(project: ProjectState, at: MenuAnchor) {
   const others = state.projects.filter((p) => p !== project);
-  const otherGroups = state.groups.filter((g) => g.id !== project.groupId);
+  const otherGroups = state.groups.filter((g) => g.id !== project.groupId && !isRootGroup(g));
   const entries: MenuEntry[] = [{ label: 'Rename…', id: 'rename', key: 'r' }];
   if (project.name !== folderName(project.path)) entries.push({ label: 'Use Folder Name', id: 'reset-name', key: 'n' });
-  entries.push(
+  if (!project.pinned) entries.push(
     'separator',
     otherGroups.length
       ? {
@@ -2039,19 +2436,26 @@ async function projectMenu(project: ProjectState, at: MenuAnchor) {
         }
       : { label: project.groupId ? 'Move to New Group' : 'Add to New Group', id: 'group-new', key: 'g' },
   );
-  if (project.groupId) entries.push({ label: 'Remove from Group', id: 'ungroup', key: 'u' });
+  if (project.groupId && !project.pinned) entries.push({ label: 'Remove from Group', id: 'ungroup', key: 'u' });
   entries.push(
+  );
+  // Folding is how a tab shrinks; a row in the left panel has nothing to fold.
+  if (!inSidebar()) entries.push(
     'separator',
     { label: project.folded ? 'Unfold' : 'Fold', id: 'fold', key: 'e' },
     { label: 'Fold Others', id: 'fold-others', key: 'o', enabled: others.some((p) => !p.folded) },
     { label: 'Unfold All', id: 'unfold-all', key: 'a', enabled: state.projects.some((p) => p.folded) },
+  );
+  entries.push(
     'separator',
     { label: 'Choose Icon…', id: 'icon-choose', key: 'i' },
     { label: 'Detect Icon Again', id: 'icon-detect' },
     'separator',
+    { label: 'New Agent Session', id: 'agent', key: 't' },
+    { label: 'Open Terminal Here', id: 'shell', key: 's' },
     { label: 'Reveal in Finder', id: 'reveal', key: 'f' },
     'separator',
-    { label: 'Close Project', id: 'close', key: 'c' },
+    { label: project.pinned ? 'Close Project (always open)' : 'Close Project', id: 'close', key: 'c', enabled: !project.pinned },
   );
   const choice = await showMenu(entries, at);
   // The project may have been closed while the menu was open.
@@ -2086,6 +2490,12 @@ async function projectMenu(project: ProjectState, at: MenuAnchor) {
     }
     case 'icon-detect':
       return void detectIcon(project);
+    case 'agent':
+      return void newAgent(project);
+    case 'shell':
+      // A session spawns only in the open project, so the project comes forward first.
+      if (state.activeProjectId !== project.id) activateProject(project.id);
+      return void addPane('shell', project);
     case 'reveal':
       return api.reveal(project.path);
     case 'close':
@@ -2126,6 +2536,34 @@ function cycleProject(step: number) {
 
 const folderName = (dir: string) => dir.split('/').filter(Boolean).pop() ?? dir;
 
+// Every folder in ~/chaos-projects, ~/other-projects and ~/unity-projects is a pinned project: it is
+// opened on its own, its tab leads the row and it cannot be closed. Folders made since are picked up
+// when the window comes back to the front; a pinned folder that is gone becomes an ordinary project.
+let pinnedAt = 0;
+
+async function syncPinned() {
+  pinnedAt = Date.now();
+  const list = await api.pinnedProjects();
+  const dirs = new Set(list.dirs);
+  let changed = list.roots.join('\n') !== pinnedRoots.join('\n');
+  pinnedRoots = list.roots;
+  for (const p of state.projects) {
+    const pinned = dirs.has(p.path);
+    if (Boolean(p.pinned) !== pinned) changed = true;
+    p.pinned = pinned || undefined;
+    dirs.delete(p.path);
+  }
+  for (const dir of dirs) {
+    createProject(dir).pinned = true;
+    changed = true;
+  }
+  if (!changed) return;
+  normalizeGroups();
+  emptyEl.hidden = state.projects.length > 0;
+  renderTabs();
+  save();
+}
+
 function createProject(dir: string): ProjectState {
   const project: ProjectState = {
     id: uuid(),
@@ -2133,6 +2571,8 @@ function createProject(dir: string): ProjectState {
     path: dir,
     panes: [],
     layout: null,
+    // Project tabs open folded: only the icon and status show until the tab is unfolded.
+    folded: true,
     tasks: [],
     autopilot: { on: false, limit: 2 },
   };
@@ -2196,7 +2636,7 @@ async function moveSession(v: PaneView) {
   closePane(v, { ask: false, stop: false });
   const project = projectFor(dir) ?? createProject(dir);
   if (follow) activateProject(project.id);
-  const moved = addPane('claude', project, { sessionId, title: customTitle });
+  const moved = addPane('claude', project, { sessionId, title: customTitle, ...worktreeOptions(project, dir) });
   if (!moved) return;
   moved.pane.title = title;
   moved.pane.transcript = res.transcript;
@@ -2211,6 +2651,7 @@ const projectBusy = (project: ProjectState) => project.panes.some((p) => views.h
 
 /** `ask: false` skips the question about working sessions when the caller already asked. */
 function closeProject(project: ProjectState, { ask = true } = {}) {
+  if (project.pinned) return;
   if (ask && projectBusy(project) && !confirm(`${project.name} has sessions still working. Close the project?`)) return;
   for (const pane of project.panes) {
     const v = views.get(pane.id);
@@ -2303,6 +2744,26 @@ async function startTask(project: ProjectState, task: TaskState, byHand: boolean
   });
   task.paneId = v?.pane.id;
   renderTasks();
+  save();
+}
+
+/**
+ * Opens a Claude session in the lowest agent checkout of the project's repository no session works
+ * in, `<repo>-agentN` beside the repo, made on `agent/agentN` when it does not exist yet.
+ */
+async function newAgent(project: ProjectState) {
+  const busy = [
+    ...[...views.values()].filter((v) => v.pane.kind === 'claude').map((v) => v.pane.cwd ?? v.project.path),
+    ...agents.filter((a) => !a.ended).map((a) => a.cwd),
+  ];
+  const res = await api.addAgent(project.path, busy);
+  if (!state.projects.includes(project)) return;
+  if (!res.ok) return void alert(`Could not open an agent: ${res.error}`);
+  if (state.activeProjectId !== project.id) activateProject(project.id);
+  const v = addPane('claude', project, { cwd: res.cwd, branch: res.branch, name: res.name });
+  if (!v) return;
+  v.pane.title = res.name;
+  renderTitle(v);
   save();
 }
 
@@ -2596,8 +3057,57 @@ const SORTS: Record<SessionSort, (a: SessionRow, b: SessionRow) => number> = {
   project: (a, b) => a.rank - b.rank || b.time - a.time,
 };
 
-const samePath = (a: string, b: string) => a.replace(/(.)\/+$/, '$1') === b.replace(/(.)\/+$/, '$1');
-const projectFor = (dir: string) => state.projects.find((p) => samePath(p.path, dir));
+const trimPath = (dir: string) => dir.replace(/(.)\/+$/, '$1');
+const samePath = (a: string, b: string) => trimPath(a) === trimPath(b);
+
+/** The repository each folder is in, asked once per folder; null when it is in none. */
+const repos = new Map<string, RepoOf | null>();
+const reposAsked = new Set<string>();
+let reposQueued: string[] = [];
+
+/** Asks for the folders not known yet; rows drawn meanwhile are drawn again once they are. */
+function askRepos(dirs: string[]): Promise<void> {
+  const fresh = [...new Set(dirs.map(trimPath))].filter((d) => !reposAsked.has(d));
+  if (!fresh.length) return Promise.resolve();
+  for (const d of fresh) reposAsked.add(d);
+  return api.repoOf(fresh).then((found) => {
+    fresh.forEach((d, i) => repos.set(d, found[i] ?? null));
+    renderSessions();
+  });
+}
+
+function repoOf(dir: string): RepoOf | null | undefined {
+  const d = trimPath(dir);
+  if (!repos.has(d) && !reposAsked.has(d)) {
+    // Every folder a render looks up goes out in one request.
+    if (!reposQueued.length) queueMicrotask(() => void askRepos(reposQueued.splice(0)));
+    reposQueued.push(d);
+  }
+  return repos.get(d);
+}
+
+const within = (sub: string, parent: string) => !parent || sub === parent || sub.startsWith(`${parent}/`);
+
+/**
+ * The project a folder's sessions go under: the project of that very folder, otherwise the project
+ * of the repository's main checkout when the folder is in one of its worktrees, such as an agent's.
+ */
+function projectFor(dir: string): ProjectState | undefined {
+  const exact = state.projects.find((p) => samePath(p.path, dir));
+  if (exact) return exact;
+  const repo = repoOf(dir);
+  if (!repo) return;
+  return state.projects.find((p) => {
+    const r = repoOf(p.path);
+    return r?.root === repo.root && r.top === r.root && within(repo.sub, r.sub);
+  });
+}
+
+/** What a pane opened in `dir` needs when the project is the repository's rather than the folder's. */
+function worktreeOptions(project: ProjectState, dir: string): PaneOptions {
+  if (samePath(project.path, dir)) return {};
+  return { cwd: trimPath(dir), branch: repos.get(trimPath(dir))?.branch };
+}
 const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 /** Lowercase without accents, so "gecis" finds "Geçiş" and "istanbul" finds "İstanbul". */
 const fold = (text: string) => text.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/ı/g, 'i');
@@ -2710,7 +3220,7 @@ function sessionRows(): SessionRow[] {
             ? [`chip ${shippedOf(a.sessionId)}`, SHIPPED_TEXT[shippedOf(a.sessionId)!]]
             : ['chip idle', 'Idle'],
       tooltip: `${a.cwd}\nClick to open in Liszt (${bgId ? `claude attach ${bgId}` : 'claude --resume'})`,
-      open: () => openSession(a.cwd, a.sessionId, named, bgId),
+      open: () => void openSession(a.cwd, a.sessionId, named, bgId),
     });
   }
   for (const s of app.values()) {
@@ -2736,7 +3246,7 @@ function sessionRows(): SessionRow[] {
       dot: '',
       chip: ['chip', archived ? 'Archived' : ''],
       tooltip: gone ? `${s.cwd}\nCannot be opened: ${gone}` : `${s.cwd}\nClick to open in Liszt (claude --resume)`,
-      open: gone ? undefined : () => openSession(s.cwd, s.sessionId, s.title),
+      open: gone ? undefined : () => void openSession(s.cwd, s.sessionId, s.title),
     });
   }
   // Every other session Claude Code still has a transcript of: ones that ran in a terminal and
@@ -2766,7 +3276,7 @@ function sessionRows(): SessionRow[] {
       dot: '',
       chip: ['chip', archived ? 'Archived' : ''],
       tooltip: t.gone ? `${t.cwd}\nCannot be opened: its folder no longer exists` : `${t.cwd}\nClick to open in Liszt (claude --resume)`,
-      open: t.gone ? undefined : () => openSession(t.cwd, t.sessionId, title),
+      open: t.gone ? undefined : () => void openSession(t.cwd, t.sessionId, title),
     });
   }
   // Sessions archived from Liszt that nothing lists any more, not even a transcript.
@@ -2792,7 +3302,7 @@ function sessionRows(): SessionRow[] {
       dot: '',
       chip: ['chip', m.archived ? 'Archived' : ''],
       tooltip: `${cwd}\nClick to open in Liszt (claude --resume)`,
-      open: () => openSession(cwd, sessionId, title),
+      open: () => void openSession(cwd, sessionId, title),
     });
   }
   // Outside Liszt an unread session shows it the way a pane does: once nothing is working in it.
@@ -2881,27 +3391,30 @@ function clearSelection() {
   renderSessions();
 }
 
-async function sessionRowsMenu(rows: SessionRow[], at: MenuAnchor) {
+/** Shells, picked in the project tree, can only be closed; the rest applies to the Claude sessions. */
+async function sessionRowsMenu(rows: SessionRow[], at: MenuAnchor, shells: PaneView[] = []) {
   const list = rows.filter((r) => !pendingSessions.has(r.sessionId));
-  if (!list.length) return;
+  if (!list.length && !shells.length) return;
   const n = list.length;
   const unread = !list.some((r) => r.unread);
-  const closable = list.filter((r) => r.view || r.live);
+  const closable = list.filter((r) => r.view || r.live).length + shells.length;
   const archived = !list.every((r) => r.archived);
-  const choice = await showMenu(
-    [
-      { label: unread ? `Mark ${n} as Unread` : `Mark ${n} as Read`, id: 'unread', key: 'u' },
-      'separator',
-      { label: closable.length ? `Close ${closable.length} Sessions` : 'Close Sessions', id: 'close', key: 'c', enabled: closable.length > 0 },
-      archived ? { label: `Archive ${n} Sessions`, id: 'archive', key: 'a' } : { label: `Unarchive ${n} Sessions`, id: 'unarchive', key: 'a' },
-      'separator',
-      { label: `Delete ${n} Sessions…`, id: 'delete', key: 'd', danger: true },
-    ],
-    at,
-  );
+  const count = (k: number) => `${k} ${k === 1 ? 'Session' : 'Sessions'}`;
+  const claude: MenuEntry[] = n
+    ? [
+        { label: unread ? `Mark ${n} as Unread` : `Mark ${n} as Read`, id: 'unread', key: 'u' },
+        'separator',
+        { label: closable ? `Close ${count(closable)}` : 'Close Sessions', id: 'close', key: 'c', enabled: closable > 0 },
+        archived ? { label: `Archive ${count(n)}`, id: 'archive', key: 'a' } : { label: `Unarchive ${count(n)}`, id: 'unarchive', key: 'a' },
+        'separator',
+        { label: `Delete ${count(n)}…`, id: 'delete', key: 'd', danger: true },
+      ]
+    : [{ label: `Close ${count(closable)}`, id: 'close', key: 'c' }];
+  const choice = await showMenu(claude, at);
   if (!choice) return;
   // Panes closed while the menu was open are left out.
   const still = list.filter((r) => !r.view || views.get(r.view.pane.id) === r.view);
+  const liveShells = shells.filter((v) => views.get(v.pane.id) === v);
   selectedSessions.clear();
   selectionAnchor = undefined;
   switch (choice) {
@@ -2914,6 +3427,7 @@ async function sessionRowsMenu(rows: SessionRow[], at: MenuAnchor) {
       return save();
     case 'close':
       if (!confirmClose(still)) return renderSessions();
+      for (const v of liveShells) closePane(v);
       await Promise.all(still.map((r) => closeSession(r, false)));
       return renderSessions();
     case 'archive':
@@ -3052,6 +3566,11 @@ async function deleteSessions(rows: SessionRow[]) {
 
 function renderSessions() {
   sessionChips.clear();
+  // With the projects in the left panel, the sessions are the tree's branches.
+  if (inSidebar()) {
+    if (state.sidebar === 'sessions') renderTabs();
+    return;
+  }
   if (state.sidebar !== 'sessions') return;
   const all = sessionRows();
   const terms = fold(sessionSearch.value).split(/\s+/).filter(Boolean);
@@ -3088,12 +3607,14 @@ function renderSessions() {
 }
 
 /** Opens a session in a new pane of its folder's project, adding the folder as a project if needed. */
-function openSession(cwd: string, sessionId: string, title: string, bgId?: string) {
+async function openSession(cwd: string, sessionId: string, title: string, bgId?: string) {
   // Opening it reads it; from here on its pane keeps whether it is unread.
   markUnread(sessionId, false);
-  const project = projectFor(cwd) ?? createProject(cwd.replace(/(.)\/+$/, '$1'));
+  // Clicked before the repositories were known, an agent's session would open a project of its own.
+  await askRepos([cwd, ...state.projects.map((p) => p.path)]);
+  const project = projectFor(cwd) ?? createProject(trimPath(cwd));
   if (state.activeProjectId !== project.id) activateProject(project.id);
-  const v = addPane('claude', project, { sessionId, bgId });
+  const v = addPane('claude', project, { sessionId, bgId, ...worktreeOptions(project, cwd) });
   if (v && title) {
     v.pane.title = title;
     renderTitle(v);
@@ -3532,7 +4053,17 @@ function setSidebar(view: SidebarView | null) {
 /** The left panel shows Changes or Sessions, so opening one closes the other. */
 function toggleSidebar(view: SidebarView) {
   setSidebar(state.sidebar === view ? null : view);
-  if (state.sidebar === 'sessions') sessionSearch.focus();
+  if (state.sidebar === 'sessions' && !inSidebar()) sessionSearch.focus();
+}
+
+/** Lists the projects as top-bar tabs or as a tree in the left panel, which opens to show it. */
+function setProjectList(list: 'tabs' | 'sidebar') {
+  state.projectList = list;
+  document.body.dataset.projects = list;
+  paintHints();
+  renderTabs();
+  if (list === 'sidebar') setSidebar('sessions');
+  else save();
 }
 
 function setTasksPanel(on: boolean) {
@@ -3599,6 +4130,10 @@ function onMenu(command: string) {
       return void addPane('claude');
     case 'new-shell':
       return void addPane('shell');
+    case 'new-agent': {
+      const project = activeProject();
+      return void (project && newAgent(project));
+    }
     case 'split-right':
       return void addPane('claude', activeProject(), { split: 'right' });
     case 'split-down':
@@ -3619,6 +4154,10 @@ function onMenu(command: string) {
       return toggleSidebar('changes');
     case 'toggle-sessions':
       return toggleSidebar('sessions');
+    case 'toggle-project-list':
+      return setProjectList(inSidebar() ? 'tabs' : 'sidebar');
+    case 'settings':
+      return void showSettings();
     case 'toggle-tasks':
       return setTasksPanel(!state.tasksPanel);
     case 'next-pane':
@@ -3721,16 +4260,19 @@ for (const [id, svg] of [
   ['toggle-sidebar', ICONS.branch],
   ['toggle-sessions', ICONS.sessions],
   ['toggle-tasks', ICONS.tasks],
+  ['open-settings', ICONS.settings],
 ] as const) {
   byId(id).innerHTML = svg;
 }
 byId('add-project').innerHTML = ICONS.plus;
 byId('new-project').addEventListener('click', () => void newProject());
-// ⌃N, as the menu shows it: taken before the terminal, where it would step through the prompt history.
+// New Project's shortcut (⌃N unless changed in Settings): taken before the terminal, where ⌃N would
+// step through the prompt history.
 window.addEventListener(
   'keydown',
   (e) => {
-    if (e.code !== 'KeyN' || !e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+    const press = { code: e.code, meta: e.metaKey, control: e.ctrlKey, alt: e.altKey, shift: e.shiftKey };
+    if (!matchesAccelerator(shortcutFor('new-project', shortcuts), press)) return;
     e.preventDefault();
     e.stopPropagation();
     void newProject();
@@ -3744,7 +4286,53 @@ byId('new-shell').addEventListener('click', () => addPane('shell'));
 sidebarBtn.addEventListener('click', () => toggleSidebar('changes'));
 sessionsBtn.addEventListener('click', () => toggleSidebar('sessions'));
 tasksBtn.addEventListener('click', () => setTasksPanel(!state.tasksPanel));
+byId('open-settings').addEventListener('click', () => void showSettings());
+
+function showSettings() {
+  return openSettings({
+    api,
+    projectList: () => state.projectList ?? 'tabs',
+    setProjectList,
+    changed: (settings) => {
+      shortcuts = settings.shortcuts;
+      claudeView = settings.claudeView;
+      paintHints();
+      renderTabs();
+      renderSessionBar();
+      for (const v of views.values()) paintView(v);
+      for (const project of state.projects) if (!project.panes.length) renderLayout(project);
+      void syncPinned();
+    },
+  });
+}
+
+/** The shortcuts in the top bar's tooltips, which follow the ones chosen in Settings. */
+function paintHints() {
+  const titles: Array<[string, string, string]> = [
+    ['add-project', 'Add project', 'add-project'],
+    ['new-project', "New project: a Claude session that makes the project's folder and moves into it", 'new-project'],
+    ['new-shell', 'New shell', 'new-shell'],
+    ['toggle-sidebar', 'Changes', 'toggle-sidebar'],
+    ['toggle-sessions', inSidebar() ? 'Projects' : 'Sessions', 'toggle-sessions'],
+    ['toggle-tasks', 'Tasks', 'toggle-tasks'],
+    ['open-settings', 'Settings', 'settings'],
+  ];
+  for (const [el, text, id] of titles) byId(el).title = withKey(text, id);
+  byId('new-claude').title = withKey('New Claude session', 'new-claude') + (keyHint('split-right') ? ` · split right ${keyHint('split-right')}` : '');
+  byId('empty-add').textContent = keyHint('add-project') ? `Add project · ${keyHint('add-project')}` : 'Add project';
+}
 sessionSearch.addEventListener('input', () => renderSessions());
+treeSearch.addEventListener('input', () => renderTabs());
+treeSearch.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || e.isComposing || !selectedSessions.size) return;
+  e.preventDefault();
+  clearSelection();
+});
+// Esc lets go of the sessions picked in the tree, unless something else has the key.
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || e.defaultPrevented || !inSidebar() || !selectedSessions.size) return;
+  clearSelection();
+});
 sessionSearch.addEventListener('keydown', (e) => {
   if (e.isComposing) return;
   if (e.key === 'Enter') {
@@ -3767,6 +4355,7 @@ taskInput.addEventListener('keydown', (e) => {
   taskInput.value = '';
 });
 window.addEventListener('focus', () => void refreshGit());
+window.addEventListener('focus', () => Date.now() - pinnedAt > 30_000 && void syncPinned());
 window.addEventListener('focus', () => void refreshJobs());
 setInterval(() => void refreshJobs(), JOBS_INTERVAL);
 setInterval(() => void refreshGit(), 5000);
@@ -3781,6 +4370,7 @@ setInterval(() => {
 }, 1000);
 
 async function boot() {
+  ({ shortcuts, claudeView } = await api.settings());
   const saved = await api.loadState();
   if (saved) state = { ...state, ...saved };
   for (const project of state.projects) {
@@ -3803,16 +4393,24 @@ async function boot() {
   // Older states kept the Changes panel as a boolean.
   const side: unknown = state.sidebar;
   setSidebar(side === true || side === 'changes' ? 'changes' : side === 'sessions' ? 'sessions' : null);
+  document.body.dataset.projects = state.projectList ??= 'tabs';
+  paintHints();
   if (!(state.sessionFilter in FILTERS)) state.sessionFilter = 'active';
   if (!(state.sessionSort in SORTS)) state.sessionSort = 'status';
   sessionFilter.set(state.sessionFilter);
   sessionSort.set(state.sessionSort);
+  treeFilter.set(state.sessionFilter);
+  treeSort.set(state.sessionSort);
   setTasksPanel(state.tasksPanel);
+  void askRepos(state.projects.map((p) => p.path));
   for (const project of state.projects) {
     for (const pane of project.panes) createView(project, pane);
     renderLayout(project);
-    if (!project.icon || (!project.icon.custom && !project.icon.image)) void detectIcon(project);
+    if (!project.icon || (!project.icon.custom && (!project.icon.image || project.icon.generated))) void detectIcon(project);
+    // Every project tab starts folded.
+    project.folded = true;
   }
+  await syncPinned();
   const active = activeProject() ?? state.projects[0] ?? null;
   activateProject(active?.id ?? null);
   // Chats that kept running in the session host while Liszt was closed are attached to again in

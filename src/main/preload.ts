@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { EffortLevel, ModelInfo, PermissionMode } from '@anthropic-ai/claude-agent-sdk';
 import type {
+  AgentResult,
   AgentSession,
   AppSession,
   AppState,
@@ -16,7 +17,10 @@ import type {
   HostTerm,
   MoveResult,
   NotifyKind,
+  PinnedProjects,
+  Settings,
   ProjectIcon,
+  RepoOf,
   SpawnOptions,
   SpawnResult,
   TranscriptSession,
@@ -67,12 +71,20 @@ const api = {
   gitInfo: (cwd: string): Promise<GitInfo> => ipcRenderer.invoke('git:info', cwd),
   addWorktree: (project: string, title: string): Promise<WorktreeResult> => ipcRenderer.invoke('worktree:add', project, title),
   removeWorktree: (project: string, dir: string): Promise<GitResult> => ipcRenderer.invoke('worktree:remove', project, dir),
+  repoOf: (dirs: string[]): Promise<(RepoOf | null)[]> => ipcRenderer.invoke('repo:of', dirs),
+  addAgent: (project: string, busy: string[]): Promise<AgentResult> => ipcRenderer.invoke('agent:add', project, busy),
   projectIcon: (dir: string): Promise<ProjectIcon> => ipcRenderer.invoke('project:icon', dir),
   pickIcon: (): Promise<string | null> => ipcRenderer.invoke('dialog:pickIcon'),
   closeSession: (sessionId: string, bgId?: string): Promise<GitResult> => ipcRenderer.invoke('sessions:close', sessionId, bgId),
   moveSession: (sessionId: string, bgId: string | undefined, to: string): Promise<MoveResult> =>
     ipcRenderer.invoke('sessions:move', sessionId, bgId, to),
   newProjectFolder: (): Promise<string> => ipcRenderer.invoke('projects:incubator'),
+  pinnedProjects: (): Promise<PinnedProjects> => ipcRenderer.invoke('projects:pinned'),
+  settings: (): Promise<Settings> => ipcRenderer.invoke('settings:get'),
+  setSettings: (settings: Settings): Promise<Settings> => ipcRenderer.invoke('settings:set', settings),
+  /** The next key combination pressed: an accelerator, '' to clear the shortcut, or null when cancelled. */
+  recordShortcut: (): Promise<string | null> => ipcRenderer.invoke('settings:record'),
+  cancelRecording: () => ipcRenderer.send('settings:record-cancel'),
   deleteSession: (sessionId: string, bgId?: string): Promise<GitResult> => ipcRenderer.invoke('sessions:delete', sessionId, bgId),
   reveal: (dir: string) => ipcRenderer.send('shell:reveal', dir),
   copy: (text: string) => ipcRenderer.send('clipboard:write', text),
