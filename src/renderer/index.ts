@@ -41,6 +41,7 @@ import { ICONS, KIND_GLYPH } from './icons';
 import { leaf, panesIn, removePane, replacePane, splitPane, type Side } from './layout';
 import { closeMenu, dropdown, showMenu, type MenuAnchor, type MenuEntry } from './menu';
 import { openSettings } from './settings';
+import { mediaLinks, openMedia, opensInViewer } from './viewer';
 import { matchesAccelerator, shortcutFor, shortcutLabel } from '../shared/shortcuts';
 
 declare global {
@@ -362,6 +363,7 @@ function createView(project: ProjectState, pane: PaneState): PaneView {
       interrupt: () => api.chatInterrupt(pane.id),
       setMode: (mode) => api.chatMode(pane.id, mode),
       openExternal: (url) => api.openExternal(url),
+      openMedia: (target) => openMedia(api, target),
       key: () => false,
       wheel: (e) => {
         if (!e.metaKey) return false;
@@ -439,6 +441,12 @@ function createView(project: ProjectState, pane: PaneState): PaneView {
 /** A pane shows a terminal: every shell, and a Claude session switched to Claude Code's own UI. */
 const inTerminal = (v: PaneView) => v.pane.kind === 'shell' || Boolean(v.pane.terminal);
 
+/** A link clicked in a terminal: an image or video shows in the viewer, a web page in the browser. */
+function openLink(uri: string) {
+  if (opensInViewer(uri)) openMedia(api, uri);
+  else api.openExternal(uri);
+}
+
 /** Makes a pane's terminal the first time it shows one. */
 function ensureTerminal(v: PaneView): Terminal {
   if (v.term) return v.term;
@@ -452,12 +460,15 @@ function ensureTerminal(v: PaneView): Terminal {
     scrollback: 10000,
     macOptionClickForcesSelection: true,
     theme: THEME,
+    // OSC 8 links a program prints: images and videos open in the viewer, web pages in the browser.
+    linkHandler: { activate: (_e, uri) => openLink(uri), allowNonHttpProtocols: true },
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
   term.loadAddon(new Unicode11Addon());
   term.unicode.activeVersion = '11';
-  term.loadAddon(new WebLinksAddon((_e, uri) => api.openExternal(uri)));
+  term.loadAddon(new WebLinksAddon((_e, uri) => openLink(uri)));
+  term.registerLinkProvider(mediaLinks(term, (target) => openMedia(api, target)));
   term.open(v.termHost);
   try {
     const gl = new WebglAddon();

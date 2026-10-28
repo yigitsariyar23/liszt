@@ -89,6 +89,8 @@ const api = {
   reveal: (dir: string) => ipcRenderer.send('shell:reveal', dir),
   copy: (text: string) => ipcRenderer.send('clipboard:write', text),
   openExternal: (url: string) => ipcRenderer.send('open:external', url),
+  /** Opens a local image or video in the app macOS opens it with. */
+  openPath: (file: string) => ipcRenderer.send('open:path', file),
   notify: (n: { title: string; body: string; paneId: string; kind: NotifyKind }) => ipcRenderer.send('notify', n),
   setBadge: (text: string) => ipcRenderer.send('badge', text),
   onData: (cb: (id: string, data: string) => void) => on('pty:data', cb),

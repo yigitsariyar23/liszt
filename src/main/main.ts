@@ -1,4 +1,4 @@
-import { BrowserWindow, Menu, app, clipboard, dialog, ipcMain, nativeImage, shell } from 'electron';
+import { BrowserWindow, Menu, app, clipboard, dialog, ipcMain, nativeImage, protocol, shell } from 'electron';
 import type { MenuItemConstructorOptions } from 'electron';
 import * as pty from 'node-pty';
 import { execFile, type ChildProcess } from 'node:child_process';
@@ -7,9 +7,11 @@ import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { Readable } from 'node:stream';
 import type { EffortLevel, PermissionMode } from '@anthropic-ai/claude-agent-sdk';
 import { HOST_PROTOCOL, TERM_PROTOCOL } from '../shared/types';
 import { acceleratorOf, shortcutFor } from '../shared/shortcuts';
+import { MEDIA_SCHEME, mediaType } from '../shared/media';
 import type {
   AgentResult,
   AgentSession,
@@ -1284,6 +1286,48 @@ ipcMain.on('open:external', (_e, url: string) => {
   if (/^https?:\/\//.test(url)) void shell.openExternal(url);
 });
 
+const expandHome = (p: string) => (p === '~' || p.startsWith('~/') ? path.join(os.homedir(), p.slice(1)) : p);
+
+// The media viewer's "Open" button: the file in the app macOS opens it with.
+ipcMain.on('open:path', (_e, file: string) => {
+  if (mediaType(file)) void shell.openPath(expandHome(file));
+});
+
+// The window loads local images and videos from liszt-media://local/<path>, a path from home as
+// /~/<path>. Ranges are answered so a video can seek.
+protocol.registerSchemesAsPrivileged([
+  { scheme: MEDIA_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
+]);
+
+async function serveMedia(req: Request): Promise<Response> {
+  let file = decodeURIComponent(new URL(req.url).pathname);
+  if (file.startsWith('/~/')) file = expandHome(file.slice(1));
+  const type = mediaType(file);
+  if (!type || !path.isAbsolute(file)) return new Response(null, { status: 403 });
+  const stat = await fs.promises.stat(file).catch(() => null);
+  if (!stat?.isFile()) return new Response(null, { status: 404 });
+  const size = stat.size;
+  const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.get('range') ?? '');
+  let start = 0;
+  let end = size - 1;
+  if (range && (range[1] || range[2])) {
+    // bytes=-N asks for the last N bytes.
+    start = range[1] ? Number(range[1]) : Math.max(0, size - Number(range[2]));
+    end = range[1] && range[2] ? Math.min(Number(range[2]), size - 1) : size - 1;
+    if (start > end || start >= size) {
+      return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${size}` } });
+    }
+  }
+  const body = Readable.toWeb(fs.createReadStream(file, { start, end })) as ReadableStream;
+  const headers: Record<string, string> = {
+    'Content-Type': type,
+    'Content-Length': String(end - start + 1),
+    'Accept-Ranges': 'bytes',
+  };
+  if (!range) return new Response(body, { status: 200, headers });
+  return new Response(body, { status: 206, headers: { ...headers, 'Content-Range': `bytes ${start}-${end}/${size}` } });
+}
+
 function openPane(paneId: string) {
   win?.show();
   win?.focus();
@@ -1627,7 +1671,7 @@ ipcMain.handle('dialog:pickIcon', async () => {
   return r.canceled || !r.filePaths[0] ? null : loadIcon(r.filePaths[0]) ?? null;
 });
 
-ipcMain.on('shell:reveal', (_e, dir: string) => shell.showItemInFolder(dir));
+ipcMain.on('shell:reveal', (_e, dir: string) => shell.showItemInFolder(expandHome(dir)));
 ipcMain.on('clipboard:write', (_e, text: string) => clipboard.writeText(text));
 
 // --- Window and menu ---------------------------------------------------------------------------
@@ -1796,6 +1840,7 @@ app.whenReady().then(() => {
   loadNotifyPrefs();
   loadSettings();
   hookUrl = startHookServer();
+  protocol.handle(MEDIA_SCHEME, serveMedia);
   // A socket path must stay short (macOS allows 104 bytes), so it sits right in userData.
   configureHost(path.join(userData(), `host-${HOST_PROTOCOL}.sock`), path.join(__dirname, 'host.js'));
   configureTerms(path.join(userData(), `term-${TERM_PROTOCOL}.sock`), path.join(__dirname, 'termhost.js'));

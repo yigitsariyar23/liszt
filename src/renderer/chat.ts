@@ -14,6 +14,7 @@ import type { PermissionMode, PermissionUpdate } from '@anthropic-ai/claude-agen
 import { promptText } from '../shared/prompts';
 import type { ChatAnswer, ChatAsk, ChatImage, ChatInfo } from '../shared/types';
 import { h } from './dom';
+import { linkMediaPaths, opensInViewer } from './viewer';
 
 /**
  * A prompt the chat shows: its place among them, its text, and how many before it had the same text.
@@ -48,6 +49,8 @@ export interface ChatHost {
   interrupt(): void;
   setMode(mode: PermissionMode): void;
   openExternal(url: string): void;
+  /** Shows an image or video, a local path or a web address, in Liszt's viewer. */
+  openMedia(target: string): void;
   /** Keys the app handles itself (pane and project shortcuts); true when one was. */
   key(e: KeyboardEvent): boolean;
   /** Cmd+scroll sizes the text; true when it did. */
@@ -120,6 +123,7 @@ function escapeHtml(s: string): string {
 
 function markdown(el: HTMLElement, text: string) {
   el.innerHTML = md.parse(text, { async: false });
+  linkMediaPaths(el);
   for (const pre of el.querySelectorAll('pre')) {
     const copy = h('button', 'copy', 'Copy');
     copy.addEventListener('click', () => {
@@ -366,8 +370,9 @@ export class ChatView {
       const a = (e.target as HTMLElement).closest('a');
       if (!a) return;
       e.preventDefault();
-      const href = a.getAttribute('href') ?? '';
-      if (/^https?:\/\//.test(href)) this.host.openExternal(href);
+      const href = a.dataset.media ?? a.getAttribute('href') ?? '';
+      if (opensInViewer(href)) this.host.openMedia(href);
+      else if (/^https?:\/\//.test(href)) this.host.openExternal(href);
     });
     this.setBusy(false);
     this.follow();

@@ -2273,3 +2273,74 @@ button.task-section-head:hover {
   width: 11px;
   height: 11px;
 }
+
+/* --- Media viewer: an image or video from a terminal or a chat --- */
+
+.media-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  background: rgba(8, 8, 9, 0.92);
+  outline: none;
+}
+
+.media-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* Clear of the traffic lights. */
+  padding: 10px 14px 10px 84px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bar);
+  -webkit-app-region: no-drag;
+}
+
+.media-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 12px var(--mono);
+  color: var(--muted);
+}
+
+.media-btn {
+  flex: none;
+  padding: 4px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--panel-2);
+  color: var(--text);
+  font: 12px -apple-system, BlinkMacSystemFont, sans-serif;
+  cursor: pointer;
+}
+
+.media-btn:hover {
+  border-color: var(--muted);
+}
+
+.media-stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.media-stage img,
+.media-stage video {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 4px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+}
+
+.media-error {
+  color: var(--muted);
+  font: 13px var(--mono);
+}
