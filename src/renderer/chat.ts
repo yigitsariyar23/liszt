@@ -1185,6 +1185,12 @@ export class ChatView {
       this.cycleMode();
       return;
     }
+    // Ctrl+Z undoes as Cmd+Z does, as in the terminal; Ctrl+Shift+Z redoes.
+    if (e.code === 'KeyZ' && e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      document.execCommand(e.shiftKey ? 'redo' : 'undo');
+      return;
+    }
     if (e.key === 'Escape' && this.busy) {
       e.preventDefault();
       this.host.interrupt();

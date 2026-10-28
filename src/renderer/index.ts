@@ -300,8 +300,11 @@ window.addEventListener('beforeunload', () => api.saveState(state));
 // Option stays a plain modifier so layouts that type @, [ or | with it keep working; the few
 // readline moves people expect from a macOS terminal are mapped by hand instead.
 
-const KEYMAP: Array<[(e: KeyboardEvent) => boolean, string]> = [
+const KEYMAP: Array<[(e: KeyboardEvent, v: PaneView) => boolean, string]> = [
   [(e) => e.key === 'Enter' && e.shiftKey && !e.metaKey && !e.altKey && !e.ctrlKey, '\x1b\r'], // newline in Claude's prompt
+  // Cmd+Z or Ctrl+Z undoes in Claude's prompt, where undo is Ctrl+_ and Ctrl+Z would only suspend
+  // claude. A shell keeps Ctrl+Z for job control, and its line editor may not undo with Ctrl+_.
+  [(e, v) => v.pane.kind === 'claude' && e.code === 'KeyZ' && !e.shiftKey && !e.altKey && e.metaKey !== e.ctrlKey, '\x1f'],
   [(e) => e.key === 'ArrowLeft' && e.metaKey, '\x01'],
   [(e) => e.key === 'ArrowRight' && e.metaKey, '\x05'],
   [(e) => e.key === 'Backspace' && e.metaKey, '\x15'],
@@ -311,7 +314,7 @@ const KEYMAP: Array<[(e: KeyboardEvent) => boolean, string]> = [
 ];
 
 function handleKey(v: PaneView, e: KeyboardEvent): boolean {
-  const hit = KEYMAP.find(([match]) => match(e));
+  const hit = KEYMAP.find(([match]) => match(e, v));
   if (!hit) return true;
   if (e.type === 'keydown') api.write(v.pane.id, hit[1]);
   e.preventDefault();
