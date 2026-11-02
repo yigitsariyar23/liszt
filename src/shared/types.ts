@@ -154,6 +154,11 @@ export interface AppState {
   sessionSort: SessionSort;
   /** What was done to sessions from the Sessions panel, by Claude session id. */
   sessionMarks: Record<string, SessionMark>;
+  /**
+   * Folders hidden from Liszt: their sessions are kept, but leave the project tree and the Sessions
+   * panel under every Show but Archived, which lists them again.
+   */
+  hiddenFolders?: string[];
 }
 
 /** A session archived, unarchived, deleted or marked unread from the Sessions panel. */

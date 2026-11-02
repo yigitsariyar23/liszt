@@ -2344,3 +2344,26 @@ button.task-section-head:hover {
   color: var(--muted);
   font: 13px var(--mono);
 }
+
+/* A folder under "Other folders": a row that folds its sessions away. */
+.ptree-folder {
+  color: var(--muted);
+}
+
+.ptree-folder .ptree-folder-icon {
+  flex: none;
+  opacity: 0.8;
+}
+
+.ptree-folder.hidden-folder .tab-name {
+  font-style: italic;
+  opacity: 0.6;
+}
+
+.ptree-folder + .ptree-sessions {
+  margin-left: 10px;
+}
+
+.ptree-hidden-note {
+  margin-top: 8px;
+}

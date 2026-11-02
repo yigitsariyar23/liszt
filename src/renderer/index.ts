@@ -1928,7 +1928,15 @@ function renderProjectTree() {
   }
   if (elsewhere.length) {
     els.push(h('div', 'ptree-elsewhere', 'Other folders'));
-    els.push(treeBranch('', elsewhere));
+    els.push(...treeFolders(elsewhere, terms.length > 0));
+  }
+  // Hidden folders are out of sight, not gone: a line says how many and lists them again.
+  const hiddenCount = (state.hiddenFolders ?? []).length;
+  if (hiddenCount && !terms.length && state.sessionFilter !== 'archived') {
+    const note = h('div', 'ptree-more ptree-hidden-note', `${hiddenCount} hidden ${hiddenCount === 1 ? 'folder' : 'folders'} · show`);
+    note.title = 'Show → Archived lists the sessions of hidden folders; right-click a folder there to show it again';
+    note.addEventListener('click', () => setSessionFilter('archived'));
+    els.push(note);
   }
   if (!els.length) els.push(h('div', 'side-note', 'Nothing matches.'));
   projectTreeEl.replaceChildren(...els);
@@ -2103,6 +2111,82 @@ function treeProject(p: ProjectState, sessions: TreeSession[], searching: boolea
   });
   projectTabEls.set(p.id, row);
   return open && sessions.length ? [row, treeBranch(p.id, sessions)] : [row];
+}
+
+/** Folders under "Other folders" whose sessions are listed; the rest stay folded. */
+const treeOpenFolders = new Set<string>();
+
+/**
+ * Sessions whose folder belongs to no open project, one folded row per folder (a repository's
+ * worktrees go under its main checkout), most recently active first as the sessions are sorted.
+ */
+function treeFolders(sessions: TreeSession[], searching: boolean): HTMLElement[] {
+  const byFolder = new Map<string, TreeSession[]>();
+  for (const s of sessions) {
+    const key = folderKey(s.row!.cwd);
+    if (!byFolder.has(key)) byFolder.set(key, []);
+    byFolder.get(key)!.push(s);
+  }
+  return [...byFolder].flatMap(([dir, list]) => {
+    const open = searching || treeOpenFolders.has(dir);
+    const hidden = isHiddenFolder(dir);
+    const row = h('div', `ptree-row ptree-folder${hidden ? ' hidden-folder' : ''}`);
+    row.append(iconEl(KIND_GLYPH.folder, 'ptree-folder-icon'), h('span', 'tab-name', folderLabel(dir)));
+    row.append(h('span', 'tab-count', String(list.length)));
+    const status = list.some((s) => s.dot === 'running') ? 'running' : list.some((s) => s.dot === 'unread') ? 'unread' : '';
+    row.append(h('span', `dot ${status}`));
+    row.title = `${dir}${hidden ? '\nHidden from Liszt' : ''}\nClick to ${open ? 'fold' : 'unfold'}, right-click for more`;
+    row.addEventListener('click', () => {
+      if (searching) return;
+      if (open) treeOpenFolders.delete(dir);
+      else treeOpenFolders.add(dir);
+      renderTabs();
+    });
+    row.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      void folderMenu(dir, list.flatMap((s) => s.row ?? []), pointer(e));
+    });
+    return open ? [row, treeBranch(`folder:${dir}`, list)] : [row];
+  });
+}
+
+/** A folder's menu: open it as a project, hide it from Liszt or show it again, archive its sessions. */
+async function folderMenu(dir: string, rows: SessionRow[], at: MenuAnchor) {
+  const hidden = isHiddenFolder(dir);
+  const archivable = rows.filter((r) => !r.archived && !r.live);
+  const choice = await showMenu(
+    [
+      { label: 'Add as Project', id: 'project', key: 'p' },
+      { label: 'Reveal in Finder', id: 'reveal', key: 'r' },
+      'separator',
+      hidden ? { label: 'Show Folder in Liszt', id: 'show', key: 'h' } : { label: 'Hide Folder from Liszt', id: 'hide', key: 'h' },
+      {
+        label: `Archive ${archivable.length} ${archivable.length === 1 ? 'Session' : 'Sessions'}`,
+        id: 'archive',
+        key: 'a',
+        enabled: archivable.length > 0,
+      },
+    ],
+    at,
+  );
+  switch (choice) {
+    case 'project': {
+      const project = projectFor(dir) ?? createProject(dir);
+      activateProject(project.id);
+      renderTabs();
+      return save();
+    }
+    case 'reveal':
+      return void api.reveal(dir);
+    case 'hide':
+    case 'show':
+      // Shown again, the folder may have been hidden as a parent of this one.
+      if (choice === 'show') state.hiddenFolders = (state.hiddenFolders ?? []).filter((f) => !within(dir, f));
+      return hideFolder(dir, choice === 'hide');
+    case 'archive':
+      await Promise.all(archivable.map((r) => archiveSession(r, true, false)));
+      return renderTabs();
+  }
 }
 
 /** Session rows under a project: its own first, then a few of the outside ones and a line for the rest. */
@@ -3040,6 +3124,8 @@ interface SessionRow {
   time: number;
   pinned: boolean;
   archived: boolean;
+  /** Its folder is hidden from Liszt; it is shown as an archived one is. */
+  hidden: boolean;
   /** Marked unread; shown so once nothing is working in it. */
   unread: boolean;
   /** A process runs it, in Liszt or elsewhere. */
@@ -3052,16 +3138,20 @@ interface SessionRow {
   view?: PaneView;
 }
 
-const FILTERS: Record<SessionFilter, (r: SessionRow) => boolean> = {
+const SHOWS: Record<SessionFilter, (r: SessionRow) => boolean> = {
   // One whose folder or conversation is gone can only be seen, so it waits under All.
   active: (r) => (!r.archived || r.group !== 'stopped') && Boolean(r.open),
   liszt: (r) => r.group === 'liszt',
   running: (r) => r.live,
   unread: (r) => r.unread,
   pinned: (r) => r.pinned,
-  archived: (r) => r.archived,
+  archived: (r) => r.archived || r.hidden,
   all: () => true,
 };
+/** A hidden folder's sessions are listed only under Archived, while nothing runs them. */
+const FILTERS = Object.fromEntries(
+  Object.entries(SHOWS).map(([k, show]) => [k, (r: SessionRow) => show(r) && (k === 'archived' || !r.hidden || r.group !== 'stopped')]),
+) as Record<SessionFilter, (r: SessionRow) => boolean>;
 
 const SORTS: Record<SessionSort, (a: SessionRow, b: SessionRow) => number> = {
   status: (a, b) => a.rank - b.rank || b.time - a.time,
@@ -3133,6 +3223,39 @@ const isDeleted = (sessionId: string) => Boolean(state.sessionMarks[sessionId]?.
 /** Marked unread while no Liszt pane has it; a pane keeps its own. */
 const isMarkedUnread = (sessionId: string) => Boolean(state.sessionMarks[sessionId]?.unread);
 
+// Folders hidden from Liszt keep their sessions; those leave the tree and the Sessions panel under
+// every Show but Archived, which lists them again, and from there the folder's menu
+// shows it once more.
+
+/** A folder name a tool made up: a UUID or a job's hex id, such as Creative Studio's works or ~/.claude/jobs. */
+const GENERATED = /^[0-9a-f]{8}(-[0-9a-f]{4}){0,4}(-[0-9a-f]{12})?$/i;
+
+/**
+ * The folder a session outside every project is filed under: its repository's main checkout, or its
+ * own. Folders a tool made one per run go under the folder that holds them, so a hundred runs make one row.
+ */
+function folderKey(cwd: string): string {
+  const dir = repoOf(cwd)?.root ?? trimPath(cwd);
+  const parts = dir.split('/');
+  const made = parts.findIndex((part) => GENERATED.test(part));
+  return made > 1 ? parts.slice(0, made).join('/') : dir;
+}
+
+/** A folder's name, with its parent's when it only holds what a tool made, as `works` does. */
+const folderLabel = (dir: string) => (dir.split('/').length > 3 && /^(works|jobs|tmp|runs)$/.test(folderName(dir)) ? `${folderName(parentDir(dir))} › ${folderName(dir)}` : folderName(dir));
+const isHiddenFolder = (dir: string) => (state.hiddenFolders ?? []).some((f) => within(trimPath(dir), f) || within(folderKey(dir), f));
+
+function hideFolder(dir: string, hidden: boolean) {
+  const key = trimPath(dir);
+  const rest = (state.hiddenFolders ?? []).filter((f) => f !== key);
+  state.hiddenFolders = hidden ? [...rest, key] : rest;
+  // Its sessions leave the selection with the rows that showed them. The tree is redrawn even when
+  // the Sessions panel is not what the left panel shows, as it is where the folder was picked.
+  renderSessions();
+  if (inSidebar()) renderTabs();
+  save();
+}
+
 function markUnread(sessionId: string, unread: boolean) {
   const mark = state.sessionMarks[sessionId];
   if (Boolean(mark?.unread) === unread) return;
@@ -3190,6 +3313,7 @@ function sessionRows(): SessionRow[] {
       time: v.since,
       pinned: Boolean(s?.pinned) || pinnedAgent,
       archived: isArchived(v.pane.sessionId, s?.archived),
+      hidden: false,
       unread: Boolean(v.pane.unread),
       live: v.status !== 'exited',
       dot: dotClass(v),
@@ -3222,6 +3346,7 @@ function sessionRows(): SessionRow[] {
       time: Math.max(a.startedAt, s?.lastActivityAt ?? 0),
       pinned: Boolean(a.pinned || s?.pinned),
       archived: isArchived(a.sessionId, s?.archived),
+      hidden: false,
       unread: isMarkedUnread(a.sessionId),
       live: !a.ended,
       dot: busy ? 'running' : shippedOf(a.sessionId) && !a.ended ? shippedOf(a.sessionId)! : '',
@@ -3255,6 +3380,7 @@ function sessionRows(): SessionRow[] {
       time: s.lastActivityAt,
       pinned: s.pinned,
       archived,
+      hidden: false,
       unread: isMarkedUnread(s.sessionId),
       live: false,
       dot: '',
@@ -3285,6 +3411,7 @@ function sessionRows(): SessionRow[] {
       time: t.lastActivityAt,
       pinned: false,
       archived,
+      hidden: false,
       unread: isMarkedUnread(t.sessionId),
       live: false,
       dot: '',
@@ -3311,6 +3438,7 @@ function sessionRows(): SessionRow[] {
       time: m.at,
       pinned: false,
       archived: Boolean(m.archived),
+      hidden: false,
       unread: Boolean(m.unread),
       live: false,
       dot: '',
@@ -3318,6 +3446,10 @@ function sessionRows(): SessionRow[] {
       tooltip: `${cwd}\nClick to open in Liszt (claude --resume)`,
       open: () => void openSession(cwd, sessionId, title),
     });
+  }
+  for (const r of rows) {
+    r.hidden = isHiddenFolder(r.cwd);
+    if (r.hidden && !r.view && !r.chip[1]) r.chip = ['chip', 'Hidden'];
   }
   // Outside Liszt an unread session shows it the way a pane does: once nothing is working in it.
   for (const r of rows) {
@@ -3478,6 +3610,14 @@ async function sessionRowMenu(r: SessionRow, at: MenuAnchor) {
       'separator',
       { label: 'Close Session', id: 'close', key: 'c', enabled: canClose },
       r.archived ? { label: 'Unarchive', id: 'unarchive', key: 'a' } : { label: canClose ? 'Close and Archive' : 'Archive', id: 'archive', key: 'a' },
+      // A session open in Liszt belongs to its project; only the others can take their folder out of sight.
+      ...(r.view
+        ? []
+        : [
+            r.hidden
+              ? { label: `Show “${folderLabel(folderKey(r.cwd))}” in Liszt`, id: 'show-folder', key: 'h' }
+              : { label: `Hide “${folderLabel(folderKey(r.cwd))}” from Liszt`, id: 'hide-folder', key: 'h' },
+          ]),
       'separator',
       { label: 'Delete Session…', id: 'delete', key: 'd', danger: true },
     ],
@@ -3499,6 +3639,13 @@ async function sessionRowMenu(r: SessionRow, at: MenuAnchor) {
       return void archiveSession(r, true);
     case 'unarchive':
       return void archiveSession(r, false);
+    case 'hide-folder':
+    case 'show-folder': {
+      const dir = folderKey(r.cwd);
+      // Shown again, the folder may have been hidden as a parent of this one.
+      if (choice === 'show-folder') state.hiddenFolders = (state.hiddenFolders ?? []).filter((f) => !within(dir, f) && !within(trimPath(r.cwd), f));
+      return hideFolder(dir, choice === 'hide-folder');
+    }
     case 'delete':
       return void deleteSessions([r]);
   }
