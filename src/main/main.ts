@@ -339,6 +339,17 @@ ipcMain.handle('projects:incubator', () => {
   return incubatorDir();
 });
 
+// --- Quick chat --------------------------------------------------------------------------------
+// Quick Chat opens a Claude session in an empty folder of its own, for questions that belong to no
+// project: Claude reads no project's files or instructions there, and those sessions collect under it.
+
+const quickChatDir = () => path.join(os.homedir(), '.liszt-quick-chat');
+
+ipcMain.handle('projects:quick-chat', () => {
+  fs.mkdirSync(quickChatDir(), { recursive: true });
+  return quickChatDir();
+});
+
 // --- Settings ----------------------------------------------------------------------------------
 // What the Settings screen changes, kept in settings.json: the project folders, the shortcuts and
 // how a new Claude session opens.
@@ -1719,6 +1730,7 @@ function buildMenu() {
         { type: 'separator' },
         // Taken by the page instead, before the terminal, where ⌃N would step through the prompt history.
         { ...item('New Project…', 'new-project'), registerAccelerator: false },
+        item('Quick Chat', 'quick-chat'),
         item('Add Project…', 'add-project'),
         item('Close Project', 'close-project'),
       ],

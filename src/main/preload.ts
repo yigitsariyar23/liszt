@@ -79,6 +79,7 @@ const api = {
   moveSession: (sessionId: string, bgId: string | undefined, to: string): Promise<MoveResult> =>
     ipcRenderer.invoke('sessions:move', sessionId, bgId, to),
   newProjectFolder: (): Promise<string> => ipcRenderer.invoke('projects:incubator'),
+  quickChatFolder: (): Promise<string> => ipcRenderer.invoke('projects:quick-chat'),
   pinnedProjects: (): Promise<PinnedProjects> => ipcRenderer.invoke('projects:pinned'),
   settings: (): Promise<Settings> => ipcRenderer.invoke('settings:get'),
   setSettings: (settings: Settings): Promise<Settings> => ipcRenderer.invoke('settings:set', settings),

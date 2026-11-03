@@ -366,7 +366,7 @@ function createView(project: ProjectState, pane: PaneState): PaneView {
       interrupt: () => api.chatInterrupt(pane.id),
       setMode: (mode) => api.chatMode(pane.id, mode),
       openExternal: (url) => api.openExternal(url),
-      openMedia: (target) => openMedia(api, target),
+      openMedia: (target) => openMedia(api, target, cwdOf(v)),
       key: () => false,
       wheel: (e) => {
         if (!e.metaKey) return false;
@@ -444,9 +444,12 @@ function createView(project: ProjectState, pane: PaneState): PaneView {
 /** A pane shows a terminal: every shell, and a Claude session switched to Claude Code's own UI. */
 const inTerminal = (v: PaneView) => v.pane.kind === 'shell' || Boolean(v.pane.terminal);
 
+/** The folder a pane's session runs in; a relative path it prints is taken from here. */
+const cwdOf = (v: PaneView) => v.pane.cwd ?? v.project.path;
+
 /** A link clicked in a terminal: an image or video shows in the viewer, a web page in the browser. */
-function openLink(uri: string) {
-  if (opensInViewer(uri)) openMedia(api, uri);
+function openLink(uri: string, cwd: string) {
+  if (opensInViewer(uri)) openMedia(api, uri, cwd);
   else api.openExternal(uri);
 }
 
@@ -464,14 +467,14 @@ function ensureTerminal(v: PaneView): Terminal {
     macOptionClickForcesSelection: true,
     theme: THEME,
     // OSC 8 links a program prints: images and videos open in the viewer, web pages in the browser.
-    linkHandler: { activate: (_e, uri) => openLink(uri), allowNonHttpProtocols: true },
+    linkHandler: { activate: (_e, uri) => openLink(uri, cwdOf(v)), allowNonHttpProtocols: true },
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
   term.loadAddon(new Unicode11Addon());
   term.unicode.activeVersion = '11';
-  term.loadAddon(new WebLinksAddon((_e, uri) => openLink(uri)));
-  term.registerLinkProvider(mediaLinks(term, (target) => openMedia(api, target)));
+  term.loadAddon(new WebLinksAddon((_e, uri) => openLink(uri, cwdOf(v))));
+  term.registerLinkProvider(mediaLinks(term, (target) => openMedia(api, target, cwdOf(v))));
   term.open(v.termHost);
   try {
     const gl = new WebglAddon();
@@ -2703,6 +2706,20 @@ async function newProject() {
   save();
 }
 
+/** Opens a Claude session in Liszt's own empty folder, for a question that belongs to no project. */
+async function quickChat() {
+  const dir = await api.quickChatFolder();
+  let project = projectFor(dir);
+  if (!project) {
+    project = createProject(dir);
+    project.name = 'Quick chat';
+    renderTabs();
+  }
+  if (state.activeProjectId !== project.id) activateProject(project.id);
+  addPane('claude', project);
+  save();
+}
+
 /** Claude made the project's folder; the session moves there now if its turn is over, else when it ends. */
 function onMoveRequest(paneId: string, dir: string) {
   const v = views.get(paneId);
@@ -3139,8 +3156,8 @@ interface SessionRow {
 }
 
 const SHOWS: Record<SessionFilter, (r: SessionRow) => boolean> = {
-  // One whose folder or conversation is gone can only be seen, so it waits under All.
-  active: (r) => (!r.archived || r.group !== 'stopped') && Boolean(r.open),
+  // Only what is open: a Liszt pane or a session running elsewhere. Closed ones wait under All.
+  active: (r) => r.group !== 'stopped' && Boolean(r.open),
   liszt: (r) => r.group === 'liszt',
   running: (r) => r.live,
   unread: (r) => r.unread,
@@ -4304,6 +4321,8 @@ function onMenu(command: string) {
       return;
     case 'new-project':
       return void newProject();
+    case 'quick-chat':
+      return void quickChat();
     case 'add-project':
       return void addProject();
     case 'close-project': {
@@ -4416,6 +4435,8 @@ api.onFocusPane((id) => {
 
 for (const [id, svg] of [
   ['new-project', ICONS.newProject],
+  ['quick-chat', ICONS.quickChat],
+  ['tree-quick-chat', ICONS.quickChat],
   ['new-claude', ICONS.claude],
   ['new-shell', ICONS.shell],
   ['toggle-sidebar', ICONS.branch],
@@ -4441,6 +4462,8 @@ window.addEventListener(
   true,
 );
 byId('add-project').addEventListener('click', () => void addProject());
+byId('quick-chat').addEventListener('click', () => void quickChat());
+byId('tree-quick-chat').addEventListener('click', () => void quickChat());
 byId('empty-add').addEventListener('click', () => void addProject());
 byId('new-claude').addEventListener('click', () => addPane('claude'));
 byId('new-shell').addEventListener('click', () => addPane('shell'));
@@ -4472,6 +4495,8 @@ function paintHints() {
   const titles: Array<[string, string, string]> = [
     ['add-project', 'Add project', 'add-project'],
     ['new-project', "New project: a Claude session that makes the project's folder and moves into it", 'new-project'],
+    ['quick-chat', 'Quick chat: a Claude session outside any project', 'quick-chat'],
+    ['tree-quick-chat', 'Quick chat: a Claude session outside any project', 'quick-chat'],
     ['new-shell', 'New shell', 'new-shell'],
     ['toggle-sidebar', 'Changes', 'toggle-sidebar'],
     ['toggle-sessions', inSidebar() ? 'Projects' : 'Sessions', 'toggle-sessions'],

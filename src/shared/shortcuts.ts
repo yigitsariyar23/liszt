@@ -20,6 +20,7 @@ export const SHORTCUTS: ShortcutDef[] = [
   { id: 'prev-pane', label: 'Previous session', section: 'Sessions', default: 'CmdOrCtrl+[' },
   { id: 'toggle-view', label: 'Switch chat / terminal', section: 'Sessions', default: 'CmdOrCtrl+E' },
   { id: 'new-project', label: 'New project', section: 'Projects', default: 'Ctrl+N' },
+  { id: 'quick-chat', label: 'Quick chat, outside any project', section: 'Projects', default: 'CmdOrCtrl+Shift+N' },
   { id: 'add-project', label: 'Add project', section: 'Projects', default: 'CmdOrCtrl+O' },
   { id: 'close-project', label: 'Close project', section: 'Projects', default: 'CmdOrCtrl+Shift+W' },
   { id: 'next-project', label: 'Next project', section: 'Projects', default: 'CmdOrCtrl+Shift+]' },

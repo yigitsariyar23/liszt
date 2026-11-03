@@ -95,6 +95,7 @@ The defaults; Settings can change most of them.
 | ⌥⌘T | New agent session: a Claude session in the project's next free agent checkout (see **Agents**) |
 | ⌘W | Close the focused session |
 | ⌃N | New project: a Claude session in `~/other-projects` that makes the project's folder (in any `~/*-projects`) and moves itself into its own tab |
+| ⇧⌘N | Quick chat: a Claude session outside any project, in the empty `~/.liszt-quick-chat` folder; these sessions collect under its **Quick chat** project (also a button in the top bar, and at the head of the Projects panel) |
 | ⌘O / ⇧⌘W | Add project / close project |
 | ⌘1…9, ⇧⌘] / ⇧⌘[ | Switch between projects |
 | ⌘] / ⌘[ | Switch between session tabs |
@@ -233,9 +234,9 @@ The defaults; Settings can change most of them.
   pinned in the desktop app and in the `claude agents` view are both shown this way.
 - The search box searches titles, projects, folders and status text; it ignores case and Turkish
   diacritics (`gecis` → "geçiş"). Enter opens the first result, Esc clears the box.
-- **Show**: Active (everything that is not archived and can be opened, the default), In Liszt,
-  Running, Unread, Pinned, Archived, All. Sessions whose folder or transcript has been deleted can't
-  be opened; they only show under All.
+- **Show**: Active (the open sessions: Liszt panes and sessions running elsewhere, the default;
+  closed sessions are left out), In Liszt, Running, Unread, Pinned, Archived, All. Sessions whose
+  folder or transcript has been deleted can't be opened; they only show under All.
   **Sort**: Status (those waiting on you first), Recent, Name, Project (groups under project headings).
 - Clicking a row jumps to the Liszt pane. For an outside session, its folder is added as a project
   if it isn't one already, and the session opens in a new pane: a background session with

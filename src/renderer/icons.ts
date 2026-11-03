@@ -13,6 +13,7 @@ export const ICONS = {
   pin: icon('<path d="M5.5 2.5h5M6.5 2.5v3.8L4.6 9h6.8L9.5 6.3V2.5M8 9v4.5"/>'),
   plus: icon('<path d="M8 3.2v9.6M3.2 8h9.6"/>'),
   newProject: icon('<path d="M14 7.4V6.6A1.5 1.5 0 0 0 12.5 5.1H7.7L6.2 3.5H3.5A1.5 1.5 0 0 0 2 5v6.5A1.5 1.5 0 0 0 3.5 13h4.3M12 9.6v4.2M9.9 11.7h4.2"/>'),
+  quickChat: icon('<path d="M2.5 4.2A1.7 1.7 0 0 1 4.2 2.5h7.6a1.7 1.7 0 0 1 1.7 1.7v5a1.7 1.7 0 0 1-1.7 1.7H7.2L4.4 13.3v-2.4h-.2a1.7 1.7 0 0 1-1.7-1.7z"/><path d="M8.6 4.4 6.6 7h2.8L7.4 9.6"/>'),
   stop: icon('<rect x="4.2" y="4.2" width="7.6" height="7.6" rx="1.3"/>'),
   close: icon('<path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/>'),
   more: icon('<path d="M3.5 8h.01M8 8h.01M12.5 8h.01" stroke-width="2.4"/>'),

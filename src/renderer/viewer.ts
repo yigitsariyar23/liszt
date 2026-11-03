@@ -29,13 +29,16 @@ window.addEventListener(
   true,
 );
 
-/** Shows a local path, a file: address or a web address of an image or video. */
-export function openMedia(api: LisztApi, target: string) {
+/**
+ * Shows a local path, a file: address or a web address of an image or video. A relative path is
+ * taken from `cwd`, the folder of the session that printed it.
+ */
+export function openMedia(api: LisztApi, target: string, cwd?: string) {
   const kind = mediaKind(target);
   if (!kind) return;
   close();
   const web = isWebUrl(target);
-  const file = web ? '' : localPath(target);
+  const file = web ? '' : localPath(target, cwd);
   const src = web ? target : mediaUrl(file);
 
   const el = h('div', 'media-viewer');

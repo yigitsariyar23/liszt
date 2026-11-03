@@ -7,7 +7,8 @@ npm run dist:mac
 
 # `open` only brings a running copy forward, so the old one has to quit first. Only the app itself:
 # the session host runs the same executable with arguments and keeps the chats going meanwhile.
-app_running() { pgrep -xf '.*/Liszt\.app/Contents/MacOS/Liszt' >/dev/null; }
+# -a: pgrep leaves out its own ancestors, and a deploy run from a session inside Liszt has Liszt among them.
+app_running() { pgrep -a -xf '.*/Liszt\.app/Contents/MacOS/Liszt' >/dev/null; }
 if app_running; then
   osascript -e 'tell application "Liszt" to quit' || true
   for _ in $(seq 20); do app_running || break; sleep 0.5; done

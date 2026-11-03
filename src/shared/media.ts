@@ -38,19 +38,38 @@ export const mediaKind = (target: string): 'image' | 'video' | undefined => {
 export const isWebUrl = (s: string) => /^https?:\/\//i.test(s);
 
 /**
- * A local media path in text: absolute, from home (`~/`) or a file: address, ending in a media
- * extension. Not a piece of a longer path or address, and a sentence's closing period stays out.
+ * A local media path in text, ending in a media extension: absolute, from home (`~/`), a file:
+ * address, or relative to the session's folder (`outputs/a.mp4`, `./a.png`; a bare file name stays
+ * plain text, it is too often just a name, and so does `example.com/a.png`). Not a piece of a longer path or address, and a
+ * sentence's closing period stays out.
  */
-export const MEDIA_PATH = new RegExp(String.raw`(?<![\w.~/:-])(?:file://)?~?/[^\s'"\x60<>()[\]{}|]*\.(?:${EXTS})(?![\w/-])(?!\.\w)`, 'gi');
+const PATH_CHARS = String.raw`[^\s'"\x60<>()[\]{}|]*`;
+export const MEDIA_PATH = new RegExp(
+  String.raw`(?<![\w.~/:@+-])(?:(?:file://)?~?/${PATH_CHARS}|(?:\.\.?/)+${PATH_CHARS}|(?![\w-]+\.[a-z]{2,}/)[\w@+-][\w.@+-]*/[^\s'"\x60<>()[\]{}|:]*)\.(?:${EXTS})(?![\w/-])(?!\.\w)`,
+  'gi',
+);
 
-/** The path a file: address or a path names. `~` stays for the main process to expand. */
-export function localPath(target: string): string {
-  if (!/^file:\/\//i.test(target)) return target;
-  try {
-    return decodeURIComponent(target.slice('file://'.length));
-  } catch {
-    return target.slice('file://'.length);
+/**
+ * The path a file: address or a path names; a relative one is taken from `cwd`. `~` stays for the
+ * main process to expand.
+ */
+export function localPath(target: string, cwd?: string): string {
+  let p = target;
+  if (/^file:\/\//i.test(p)) {
+    try {
+      p = decodeURIComponent(p.slice('file://'.length));
+    } catch {
+      p = p.slice('file://'.length);
+    }
   }
+  if (!cwd || p.startsWith('/') || p.startsWith('~')) return p;
+  const parts = cwd.split('/');
+  for (const seg of p.split('/')) {
+    if (seg === '..') {
+      if (parts.length > 1) parts.pop();
+    } else if (seg && seg !== '.') parts.push(seg);
+  }
+  return parts.join('/') || '/';
 }
 
 /** The address the window loads a local file from. `~/a.png` travels as `/~/a.png`. */
