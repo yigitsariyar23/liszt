@@ -14,7 +14,7 @@ import type { PermissionMode, PermissionUpdate } from '@anthropic-ai/claude-agen
 import { promptText } from '../shared/prompts';
 import type { ChatAnswer, ChatAsk, ChatImage, ChatInfo } from '../shared/types';
 import { h } from './dom';
-import { linkMediaPaths, opensInViewer } from './viewer';
+import { linkMediaPaths } from './viewer';
 
 /**
  * A prompt the chat shows: its place among them, its text, and how many before it had the same text.
@@ -48,9 +48,8 @@ export interface ChatHost {
   answer(id: string, a: ChatAnswer): void;
   interrupt(): void;
   setMode(mode: PermissionMode): void;
-  openExternal(url: string): void;
-  /** Shows an image or video, a local path or a web address, in Liszt's viewer. */
-  openMedia(target: string): void;
+  /** A link clicked in the conversation, opened as a terminal's would be: Shift opens a local path in VS Code. */
+  openLink(target: string, e: MouseEvent): void;
   /** Keys the app handles itself (pane and project shortcuts); true when one was. */
   key(e: KeyboardEvent): boolean;
   /** Cmd+scroll sizes the text; true when it did. */
@@ -371,8 +370,7 @@ export class ChatView {
       if (!a) return;
       e.preventDefault();
       const href = a.dataset.media ?? a.getAttribute('href') ?? '';
-      if (opensInViewer(href)) this.host.openMedia(href);
-      else if (/^https?:\/\//.test(href)) this.host.openExternal(href);
+      if (href && !href.startsWith('#')) this.host.openLink(href, e);
     });
     this.setBusy(false);
     this.follow();

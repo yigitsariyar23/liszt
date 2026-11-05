@@ -1304,6 +1304,61 @@ ipcMain.on('open:path', (_e, file: string) => {
   if (mediaType(file)) void shell.openPath(expandHome(file));
 });
 
+/** A path printed in a pane as an absolute one: `~` expanded, a relative one taken from `cwd`. */
+const absolutePath = (p: string, cwd: string) => {
+  const file = expandHome(p.replace(/^file:\/\/[^/]*/i, ''));
+  return path.isAbsolute(file) ? file : path.resolve(cwd, file);
+};
+
+/**
+ * What a printed path names on disk, or null: the path itself, or without a line and column
+ * (`src/a.ts:12:4`) after it.
+ */
+function onDisk(p: string, cwd: string): { file: string; line?: string; col?: string } | null {
+  if (!/[^/~.]/.test(p.replace(/^file:\/\//i, ''))) return null;
+  try {
+    const file = absolutePath(p, cwd);
+    if (fs.existsSync(file)) return { file };
+    const m = /^(.+?):(\d+)(?::(\d+))?$/.exec(p);
+    const bare = m && absolutePath(m[1], cwd);
+    return bare && fs.statSync(bare, { throwIfNoEntry: false })?.isFile() ? { file: bare, line: m[2], col: m[3] } : null;
+  } catch {
+    // An unreadable name is no path.
+    return null;
+  }
+}
+
+// A local path printed in a terminal: each candidate runs to the end of its stretch of text, and
+// the answer is the longest part of it, cut before a space or at its end, that names something on
+// disk; 0 when none does. A path may hold spaces, and words after it are not part of it.
+ipcMain.handle('paths:resolve', (_e, candidates: string[], cwd: string) =>
+  candidates.map((text) => {
+    const cuts = [text.length];
+    for (let i = text.length - 1; i > 0 && cuts.length < 24; i--) if (text[i] === ' ') cuts.push(i);
+    for (const cut of cuts) {
+      const whole = text.slice(0, cut);
+      // A sentence's closing punctuation is not part of the path, unless the name really ends so.
+      for (const s of new Set([whole.replace(/[.,:;!?]+$/, ''), whole])) if (onDisk(s, cwd)) return s.length;
+    }
+    return 0;
+  }),
+);
+
+// A path clicked in a pane: a folder opens in Finder and a file shows selected in its folder, or
+// either opens in VS Code, a file at the line printed after it.
+ipcMain.on('open:location', (_e, target: string, cwd: string, app: 'finder' | 'code') => {
+  const at = onDisk(target, cwd);
+  if (!at) return;
+  if (app === 'code') {
+    if (at.line) void shell.openExternal(`vscode://file${encodeURI(at.file)}:${at.line}${at.col ? `:${at.col}` : ''}`);
+    else
+      execFile('open', ['-b', 'com.microsoft.VSCode', at.file], (err) => {
+        if (err) void shell.openPath(at.file);
+      });
+  } else if (fs.statSync(at.file).isDirectory()) void shell.openPath(at.file);
+  else shell.showItemInFolder(at.file);
+});
+
 // The window loads local images and videos from liszt-media://local/<path>, a path from home as
 // /~/<path>. Ranges are answered so a video can seek.
 protocol.registerSchemesAsPrivileged([

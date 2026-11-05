@@ -37,6 +37,9 @@ export const mediaKind = (target: string): 'image' | 'video' | undefined => {
 
 export const isWebUrl = (s: string) => /^https?:\/\//i.test(s);
 
+/** A path on this Mac: a file: address, absolute, from home, or relative to a session's folder. */
+export const isLocalTarget = (s: string) => !/^[a-z][\w+.-]*:/i.test(s) || /^file:\/\//i.test(s);
+
 /**
  * A local media path in text, ending in a media extension: absolute, from home (`~/`), a file:
  * address, or relative to the session's folder (`outputs/a.mp4`, `./a.png`; a bare file name stays

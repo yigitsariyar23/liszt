@@ -45,6 +45,8 @@ import { hoverTip } from './tip';
 import { closeMenu, dropdown, showMenu, type MenuAnchor, type MenuEntry } from './menu';
 import { openSettings } from './settings';
 import { mediaLinks, openMedia, opensInViewer } from './viewer';
+import { pathLinks } from './paths';
+import { isLocalTarget } from '../shared/media';
 import { matchesAccelerator, shortcutFor, shortcutLabel } from '../shared/shortcuts';
 
 declare global {
@@ -376,8 +378,7 @@ function createView(project: ProjectState, pane: PaneState): PaneView {
       answer: (id, a) => answerAsk(v, id, a),
       interrupt: () => api.chatInterrupt(pane.id),
       setMode: (mode) => api.chatMode(pane.id, mode),
-      openExternal: (url) => api.openExternal(url),
-      openMedia: (target) => openMedia(api, target, cwdOf(v)),
+      openLink: (target, e) => openLink(target, cwdOf(v), e),
       key: () => false,
       wheel: (e) => {
         if (!e.metaKey) return false;
@@ -458,9 +459,15 @@ const inTerminal = (v: PaneView) => v.pane.kind === 'shell' || Boolean(v.pane.te
 /** The folder a pane's session runs in; a relative path it prints is taken from here. */
 const cwdOf = (v: PaneView) => v.pane.cwd ?? v.project.path;
 
-/** A link clicked in a terminal: an image or video shows in the viewer, a web page in the browser. */
-function openLink(uri: string, cwd: string) {
-  if (opensInViewer(uri)) openMedia(api, uri, cwd);
+/**
+ * A link clicked in a pane: an image or video shows in the viewer, a web page in the browser, any
+ * other local path in Finder. Shift-click opens a local path, media too, in VS Code.
+ */
+function openLink(uri: string, cwd: string, e?: MouseEvent) {
+  const local = isLocalTarget(uri);
+  if (local && e?.shiftKey) api.openLocation(uri, cwd, 'code');
+  else if (opensInViewer(uri)) openMedia(api, uri, cwd);
+  else if (local) api.openLocation(uri, cwd, 'finder');
   else api.openExternal(uri);
 }
 
@@ -478,14 +485,15 @@ function ensureTerminal(v: PaneView): Terminal {
     macOptionClickForcesSelection: true,
     theme: THEME,
     // OSC 8 links a program prints: images and videos open in the viewer, web pages in the browser.
-    linkHandler: { activate: (_e, uri) => openLink(uri, cwdOf(v)), allowNonHttpProtocols: true },
+    linkHandler: { activate: (e, uri) => openLink(uri, cwdOf(v), e), allowNonHttpProtocols: true },
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
   term.loadAddon(new Unicode11Addon());
   term.unicode.activeVersion = '11';
   term.loadAddon(new WebLinksAddon((_e, uri) => openLink(uri, cwdOf(v))));
-  term.registerLinkProvider(mediaLinks(term, (target) => openMedia(api, target, cwdOf(v))));
+  term.registerLinkProvider(mediaLinks(term, (e, target) => openLink(target, cwdOf(v), e)));
+  term.registerLinkProvider(pathLinks(term, api, () => cwdOf(v), (e, target) => openLink(target, cwdOf(v), e)));
   term.open(v.termHost);
   try {
     const gl = new WebglAddon();

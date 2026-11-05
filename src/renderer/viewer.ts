@@ -83,39 +83,47 @@ export function openMedia(api: LisztApi, target: string, cwd?: string) {
 export const opensInViewer = (target: string) => Boolean(mediaKind(target));
 
 /**
+ * The text of the logical line a terminal row belongs to, a long one wrapped onto the next rows
+ * included, and the cell (1-based) each of its characters sits in.
+ */
+export function logicalLine(term: Terminal, y: number): { text: string; cells: { x: number; y: number }[] } {
+  const buf = term.buffer.active;
+  let first = y - 1;
+  while (first > 0 && buf.getLine(first)?.isWrapped) first--;
+  let last = y - 1;
+  while (buf.getLine(last + 1)?.isWrapped) last++;
+  let text = '';
+  const cells: { x: number; y: number }[] = [];
+  let cell: IBufferCell | undefined;
+  for (let row = first; row <= last; row++) {
+    const line = buf.getLine(row);
+    if (!line) break;
+    for (let x = 0; x < line.length; x++) {
+      cell = line.getCell(x, cell);
+      if (!cell || cell.getWidth() === 0) continue;
+      const chars = cell.getChars() || ' ';
+      text += chars;
+      for (let i = 0; i < chars.length; i++) cells.push({ x: x + 1, y: row + 1 });
+    }
+  }
+  return { text, cells };
+}
+
+/**
  * Makes local image and video paths in a terminal clickable, also when a long one wraps onto the
  * next rows.
  */
-export function mediaLinks(term: Terminal, activate: (target: string) => void): ILinkProvider {
+export function mediaLinks(term: Terminal, activate: (e: MouseEvent, target: string) => void): ILinkProvider {
   return {
     provideLinks(y, callback) {
-      const buf = term.buffer.active;
-      let first = y - 1;
-      while (first > 0 && buf.getLine(first)?.isWrapped) first--;
-      let last = y - 1;
-      while (buf.getLine(last + 1)?.isWrapped) last++;
-      // The logical line's text, and the cell each of its characters sits in.
-      let text = '';
-      const cells: { x: number; y: number }[] = [];
-      let cell: IBufferCell | undefined;
-      for (let row = first; row <= last; row++) {
-        const line = buf.getLine(row);
-        if (!line) break;
-        for (let x = 0; x < line.length; x++) {
-          cell = line.getCell(x, cell);
-          if (!cell || cell.getWidth() === 0) continue;
-          const chars = cell.getChars() || ' ';
-          text += chars;
-          for (let i = 0; i < chars.length; i++) cells.push({ x: x + 1, y: row + 1 });
-        }
-      }
+      const { text, cells } = logicalLine(term, y);
       const links = [];
       for (const m of text.matchAll(MEDIA_PATH)) {
         const start = cells[m.index];
         const end = cells[m.index + m[0].length - 1];
         if (!start || !end || end.y < y || start.y > y) continue;
         const target = m[0];
-        links.push({ range: { start, end }, text: target, activate: () => activate(target) });
+        links.push({ range: { start, end }, text: target, activate: (e: MouseEvent) => activate(e, target) });
       }
       callback(links.length ? links : undefined);
     },
