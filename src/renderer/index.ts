@@ -197,6 +197,11 @@ let focusedPaneId: string | null = null;
 const byId = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const tabsEl = byId('tabs');
 const projectTreeEl = byId('project-tree');
+/** The hover card of a project tree session; see showTreeCard. */
+const treeCard = h('div', 'tree-card');
+document.body.append(treeCard);
+let treeCardKey: string | undefined;
+let treeCardTimer: ReturnType<typeof setTimeout> | undefined;
 const projectsCountEl = byId('projects-count');
 const sessionBarEl = byId('sessionbar');
 const workspaceEl = byId('workspace');
@@ -1223,6 +1228,8 @@ async function sessionMenu(v: PaneView, from: 'tab' | 'head', at: MenuAnchor) {
   }
   if (v.pane.kind === 'claude') entries.push({ label: 'Copy Session ID', id: 'copy-id', key: 'i', enabled: v.pane.started });
   entries.push('separator', { label: 'Close Session', id: 'close', key: 'c' }, { label: 'Close Other Sessions', id: 'close-others', key: 'o', enabled: project.panes.length > 1 });
+  // A shell has no conversation to delete; a Claude session that never started has nothing kept yet.
+  if (v.pane.kind === 'claude') entries.push('separator', { label: 'Delete Session…', id: 'delete', key: 'd', danger: true, enabled: v.pane.started });
   const choice = await showMenu(entries, at);
   // The session may have been closed while the menu was open.
   if (views.get(v.pane.id) !== v) return;
@@ -1258,6 +1265,10 @@ async function sessionMenu(v: PaneView, from: 'tab' | 'head', at: MenuAnchor) {
         if (other && other !== v) closePane(other);
       }
       return;
+    case 'delete': {
+      const row = sessionRows().find((r) => r.view === v);
+      return void (row && deleteSessions([row]));
+    }
   }
 }
 
@@ -1947,6 +1958,7 @@ function renderProjectTree() {
   // Shift-click ranges follow the tree's order; a session the tree no longer shows leaves the selection.
   shownSessionIds = [...projectTreeEl.querySelectorAll<HTMLElement>('.ptree-session')].map((el) => el.dataset.key!);
   for (const key of selectedSessions) if (!shownSessionIds.includes(key)) selectedSessions.delete(key);
+  if (treeCardKey && !shownSessionIds.includes(treeCardKey)) hideTreeCard();
   if (marquee) paintMarquee();
   // Scrolled to only when the open project or session changes, so redraws leave the scroll alone.
   const here = `${state.activeProjectId}:${focusedPaneId}`;
@@ -2014,6 +2026,7 @@ function paintMarquee() {
   }
 }
 
+projectTreeEl.addEventListener('scroll', () => hideTreeCard());
 projectTreeEl.addEventListener('mousedown', (e) => {
   if (e.button !== 0 || e.ctrlKey || (e.target as HTMLElement).isContentEditable) return;
   const tree = projectTreeEl.getBoundingClientRect();
@@ -2233,10 +2246,11 @@ function treeSession(s: TreeSession): HTMLElement {
     close.title = withKey('Close session', 'close-pane');
     el.append(close);
   }
-  el.title = v
-    ? `${s.title}${v.pane.branch ? `\n⎇ ${v.pane.branch}` : ''}\nRight-click for more`
-    : `${s.title}\n${s.row?.where ?? ''}\n${s.row?.tooltip ?? ''}`;
+  el.addEventListener('mouseenter', () => showTreeCard(key, el, s));
+  el.addEventListener('mouseleave', () => hideTreeCard(true));
+  if (treeCardKey === key) requestAnimationFrame(() => el.isConnected && showTreeCard(key, el, s, true));
   el.addEventListener('click', (e) => {
+    hideTreeCard();
     if (v && close.contains(e.target as Node)) return void closePane(v);
     if (e.shiftKey) return selectRange(key);
     if (e.metaKey) return toggleSelected(key);
@@ -2247,6 +2261,7 @@ function treeSession(s: TreeSession): HTMLElement {
   el.addEventListener('auxclick', (e) => e.button === 1 && v && closePane(v));
   el.addEventListener('contextmenu', (e) => {
     e.preventDefault();
+    hideTreeCard();
     // On a Mac ⌃-click arrives as a right-click; here it picks the session, as ⌘-click does.
     if (e.ctrlKey && e.button === 0) return toggleSelected(key);
     if (selectedSessions.has(key) && selectedSessions.size > 1) {
@@ -2258,6 +2273,54 @@ function treeSession(s: TreeSession): HTMLElement {
     else if (s.row) void sessionRowMenu(s.row, pointer(e));
   });
   return el;
+}
+
+// Hovering a tree session shows a card with its whole name, where it runs and when it last changed,
+// in place of a title tooltip the narrow panel would cut short. The tree redraws on every status
+// change, so the card follows the redrawn row by its key and refreshes its text.
+
+function clockTime(ms: number): string {
+  const d = new Date(ms);
+  const sameDay = d.toDateString() === new Date().toDateString();
+  return d.toLocaleString(undefined, sameDay ? { hour: '2-digit', minute: '2-digit' } : { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+
+function showTreeCard(key: string, el: HTMLElement, s: TreeSession, now = false) {
+  clearTimeout(treeCardTimer);
+  treeCardKey = key;
+  const fill = () => {
+    if (treeCardKey !== key || !el.isConnected) return;
+    const v = s.view;
+    const time = s.row?.time ?? v?.since;
+    const lines: HTMLElement[] = [h('div', 'tree-card-title', s.title)];
+    const where = v ? [v.project.name, v.pane.branch ? `⎇ ${v.pane.branch}` : ''].filter(Boolean).join(' · ') : (s.row?.cwd ?? '');
+    if (where) lines.push(h('div', 'tree-card-where', where));
+    if (time) lines.push(h('div', 'tree-card-time', `Updated ${duration(Date.now() - time)} ago · ${clockTime(time)}`));
+    const detail = s.row?.detail ?? (v ? v.activity : '');
+    if (detail) lines.push(h('div', 'tree-card-detail', detail));
+    treeCard.replaceChildren(...lines);
+    treeCard.classList.add('open');
+    const box = el.getBoundingClientRect();
+    const card = treeCard.getBoundingClientRect();
+    const left = Math.min(box.right + 8, window.innerWidth - card.width - 8);
+    const top = Math.max(6, Math.min(box.top, window.innerHeight - card.height - 6));
+    treeCard.style.left = `${left}px`;
+    treeCard.style.top = `${top}px`;
+  };
+  // Moving along the list keeps the card up and swaps its text; a first hover waits a moment.
+  if (now || treeCard.classList.contains('open')) fill();
+  else treeCardTimer = setTimeout(fill, 450);
+}
+
+/** `soon` leaves a moment to reach the next row, which then takes the card over without the wait. */
+function hideTreeCard(soon: unknown = false) {
+  clearTimeout(treeCardTimer);
+  const close = () => {
+    treeCardKey = undefined;
+    treeCard.classList.remove('open');
+  };
+  if (soon === true) treeCardTimer = setTimeout(close, 120);
+  else close();
 }
 
 /** A group's tab followed by its projects' tabs, or only the open one of them while it is collapsed. */

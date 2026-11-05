@@ -2375,3 +2375,42 @@ button.task-section-head:hover {
 .ptree-hidden-note {
   margin-top: 8px;
 }
+
+.tree-card {
+  position: fixed;
+  z-index: 50;
+  display: none;
+  max-width: 320px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--menu);
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.45),
+    0 2px 8px rgba(0, 0, 0, 0.3);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.4;
+  pointer-events: none;
+}
+
+.tree-card.open {
+  display: block;
+}
+
+.tree-card-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.tree-card-where,
+.tree-card-detail {
+  margin-top: 3px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.tree-card-time {
+  margin-top: 3px;
+  color: var(--faint);
+}
