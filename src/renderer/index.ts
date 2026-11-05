@@ -41,6 +41,7 @@ import { ICONS, KIND_GLYPH } from './icons';
 import { leaf, panesIn, removePane, replacePane, splitPane, type Side } from './layout';
 import { ask as askDialog, tell } from './dialog';
 import { undoNewest, undoToast } from './toast';
+import { hoverTip } from './tip';
 import { closeMenu, dropdown, showMenu, type MenuAnchor, type MenuEntry } from './menu';
 import { openSettings } from './settings';
 import { mediaLinks, openMedia, opensInViewer } from './viewer';
@@ -4627,6 +4628,7 @@ window.addEventListener(
 byId('add-project').addEventListener('click', () => void addProject());
 byId('quick-chat').addEventListener('click', () => void quickChat());
 byId('tree-quick-chat').addEventListener('click', () => void quickChat());
+for (const id of ['quick-chat', 'tree-quick-chat']) hoverTip(byId(id), () => 'Quick chat', () => keyHint('quick-chat'));
 byId('empty-add').addEventListener('click', () => void addProject());
 byId('new-claude').addEventListener('click', () => addPane('claude'));
 byId('new-shell').addEventListener('click', () => addPane('shell'));
@@ -4658,8 +4660,6 @@ function paintHints() {
   const titles: Array<[string, string, string]> = [
     ['add-project', 'Add project', 'add-project'],
     ['new-project', "New project: a Claude session that makes the project's folder and moves into it", 'new-project'],
-    ['quick-chat', 'Quick chat: a Claude session outside any project', 'quick-chat'],
-    ['tree-quick-chat', 'Quick chat: a Claude session outside any project', 'quick-chat'],
     ['new-shell', 'New shell', 'new-shell'],
     ['toggle-sidebar', 'Changes', 'toggle-sidebar'],
     ['toggle-sessions', inSidebar() ? 'Projects' : 'Sessions', 'toggle-sessions'],

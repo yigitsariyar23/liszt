@@ -2415,6 +2415,33 @@ button.task-section-head:hover {
   color: var(--faint);
 }
 
+/* A button's label and shortcut under it while hovered; see tip.ts. */
+.tip {
+  position: fixed;
+  z-index: 60;
+  display: none;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--menu);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+  color: var(--text);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.tip.open {
+  display: flex;
+}
+
+.tip-key {
+  color: var(--muted);
+  font: inherit;
+}
+
 /* In-app dialogs: questions and notices in place of confirm() and alert() ----------------------- */
 
 .dialog-backdrop {
