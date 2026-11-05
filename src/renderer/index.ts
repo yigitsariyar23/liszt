@@ -40,7 +40,7 @@ import { h, iconEl } from './dom';
 import { ICONS, KIND_GLYPH } from './icons';
 import { leaf, panesIn, removePane, replacePane, splitPane, type Side } from './layout';
 import { ask as askDialog, tell } from './dialog';
-import { undoToast } from './toast';
+import { undoNewest, undoToast } from './toast';
 import { closeMenu, dropdown, showMenu, type MenuAnchor, type MenuEntry } from './menu';
 import { openSettings } from './settings';
 import { mediaLinks, openMedia, opensInViewer } from './viewer';
@@ -3826,6 +3826,7 @@ async function deleteSessions(rows: SessionRow[]) {
   save();
   undoToast({
     message: gone.length === 1 ? `Deleted "${gone[0].title}"` : `Deleted ${gone.length} sessions`,
+    key: keyHint('undo-delete'),
     undo: () => {
       const back = gone.filter((r) => undoMarks.has(r.sessionId));
       undoDelete(back);
@@ -4470,6 +4471,8 @@ function onMenu(command: string) {
       return void newProject();
     case 'quick-chat':
       return void quickChat();
+    case 'undo-delete':
+      return void undoNewest();
     case 'add-project':
       return void addProject();
     case 'close-project': {
@@ -4605,6 +4608,19 @@ window.addEventListener(
     e.preventDefault();
     e.stopPropagation();
     void newProject();
+  },
+  true,
+);
+// Undo Delete's shortcut (⌥⌘Z unless changed in Settings) undoes a delete while its notice is
+// shown, taken before the terminal and the chat composer; with no notice the key goes on as before.
+window.addEventListener(
+  'keydown',
+  (e) => {
+    if (e.repeat) return;
+    const press = { code: e.code, meta: e.metaKey, control: e.ctrlKey, alt: e.altKey, shift: e.shiftKey };
+    if (!matchesAccelerator(shortcutFor('undo-delete', shortcuts), press) || !undoNewest()) return;
+    e.preventDefault();
+    e.stopPropagation();
   },
   true,
 );

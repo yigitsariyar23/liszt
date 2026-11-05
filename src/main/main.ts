@@ -1727,6 +1727,8 @@ function buildMenu() {
         item('Split Right with New Session', 'split-right'),
         item('Split Down with New Session', 'split-down'),
         item('Close Session', 'close-pane'),
+        // Taken by the page instead, which lets the key go on when no delete can be undone.
+        { ...item('Undo Delete', 'undo-delete'), registerAccelerator: false },
         { type: 'separator' },
         // Taken by the page instead, before the terminal, where ⌃N would step through the prompt history.
         { ...item('New Project…', 'new-project'), registerAccelerator: false },

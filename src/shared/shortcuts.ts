@@ -16,6 +16,7 @@ export const SHORTCUTS: ShortcutDef[] = [
   { id: 'split-right', label: 'Split right with a new session', section: 'Sessions', default: 'CmdOrCtrl+D' },
   { id: 'split-down', label: 'Split down with a new session', section: 'Sessions', default: 'CmdOrCtrl+Shift+D' },
   { id: 'close-pane', label: 'Close session', section: 'Sessions', default: 'CmdOrCtrl+W' },
+  { id: 'undo-delete', label: 'Undo delete, while its notice is shown', section: 'Sessions', default: 'CmdOrCtrl+Alt+Z' },
   { id: 'next-pane', label: 'Next session', section: 'Sessions', default: 'CmdOrCtrl+]' },
   { id: 'prev-pane', label: 'Previous session', section: 'Sessions', default: 'CmdOrCtrl+[' },
   { id: 'toggle-view', label: 'Switch chat / terminal', section: 'Sessions', default: 'CmdOrCtrl+E' },
