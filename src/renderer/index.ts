@@ -39,6 +39,7 @@ import { ChatView, type PromptRef } from './chat';
 import { h, iconEl } from './dom';
 import { ICONS, KIND_GLYPH } from './icons';
 import { leaf, panesIn, removePane, replacePane, splitPane, type Side } from './layout';
+import { ask as askDialog, tell } from './dialog';
 import { closeMenu, dropdown, showMenu, type MenuAnchor, type MenuEntry } from './menu';
 import { openSettings } from './settings';
 import { mediaLinks, openMedia, opensInViewer } from './viewer';
@@ -1192,9 +1193,9 @@ function promptBox(term: Terminal): { draft: string; stashed: boolean } | null {
  */
 async function renameInTerminal(v: PaneView, term: Terminal) {
   const box = promptBox(term);
-  if (!box) return alert(`"${displayTitle(v)}" is not at its prompt. Close what is open in it, then ask again.`);
+  if (!box) return void tell(`"${displayTitle(v)}" is not at its prompt. Close what is open in it, then ask again.`);
   // Ctrl+S keeps one draft aside, so it would drop the one already there.
-  if (box.draft && box.stashed) return alert(`"${displayTitle(v)}" has a draft in its prompt and another stashed with Ctrl+S. Send or clear the draft, then ask again.`);
+  if (box.draft && box.stashed) return void tell(`"${displayTitle(v)}" has a draft in its prompt and another stashed with Ctrl+S. Send or clear the draft, then ask again.`);
   v.renaming = Date.now();
   // Sent all at once, the keys would read as a paste and the Enter as a new line.
   const keys = [...(box.draft ? ['\x13'] : []), '/rename', '\r'];
@@ -1262,7 +1263,7 @@ async function sessionMenu(v: PaneView, from: 'tab' | 'head', at: MenuAnchor) {
     case 'close-others':
       for (const pane of [...project.panes]) {
         const other = views.get(pane.id);
-        if (other && other !== v) closePane(other);
+        if (other && other !== v) void closePane(other);
       }
       return;
     case 'delete': {
@@ -1480,8 +1481,13 @@ function addPane(kind: PaneKind, project = activeProject(), opts: PaneOptions = 
  * Returns false when the user chose to keep a working session. `ask: false` skips that question when
  * the caller already asked; `stop: false` leaves a background session to the caller, which deletes it.
  */
-function closePane(v: PaneView, { ask = true, stop = true } = {}): boolean {
-  if (ask && isWorking(v) && !confirm(`"${displayTitle(v)}" is still working. Close it?`)) return false;
+async function closePane(v: PaneView, { ask = true, stop = true } = {}): Promise<boolean> {
+  // With `ask: false` nothing is awaited, so the pane is gone by the time the call returns.
+  if (ask && isWorking(v)) {
+    if (!(await askDialog(`"${displayTitle(v)}" is still working. Close it?`, { ok: 'Close' }))) return false;
+    // Closed some other way while the question was open.
+    if (views.get(v.pane.id) !== v) return true;
+  }
   const project = v.project;
   const index = project.panes.indexOf(v.pane);
   const visible = panesIn(project.layout);
@@ -2494,11 +2500,11 @@ function renameGroup(group: ProjectGroup) {
   });
 }
 
-function closeGroup(group: ProjectGroup) {
+async function closeGroup(group: ProjectGroup) {
   const members = groupMembers(group).filter((p) => !p.pinned);
   const busy = members.filter(projectBusy).map((p) => p.name);
-  if (busy.length && !confirm(`${busy.join(', ')} ${busy.length === 1 ? 'has' : 'have'} sessions still working. Close the group's projects?`)) return;
-  for (const p of members) closeProject(p, { ask: false });
+  if (busy.length && !(await askDialog(`${busy.join(', ')} ${busy.length === 1 ? 'has' : 'have'} sessions still working. Close the group's projects?`, { ok: 'Close' }))) return;
+  for (const p of members) if (state.projects.includes(p)) void closeProject(p, { ask: false });
 }
 
 async function groupMenu(group: ProjectGroup, at: MenuAnchor) {
@@ -2811,7 +2817,7 @@ async function moveSession(v: PaneView) {
     return;
   }
   const follow = state.activeProjectId === v.project.id;
-  closePane(v, { ask: false, stop: false });
+  void closePane(v, { ask: false, stop: false });
   const project = projectFor(dir) ?? createProject(dir);
   if (follow) activateProject(project.id);
   const moved = addPane('claude', project, { sessionId, title: customTitle, ...worktreeOptions(project, dir) });
@@ -2828,9 +2834,12 @@ async function moveSession(v: PaneView) {
 const projectBusy = (project: ProjectState) => project.panes.some((p) => views.has(p.id) && isWorking(views.get(p.id)!));
 
 /** `ask: false` skips the question about working sessions when the caller already asked. */
-function closeProject(project: ProjectState, { ask = true } = {}) {
+async function closeProject(project: ProjectState, { ask = true } = {}) {
   if (project.pinned) return;
-  if (ask && projectBusy(project) && !confirm(`${project.name} has sessions still working. Close the project?`)) return;
+  if (ask && projectBusy(project)) {
+    if (!(await askDialog(`${project.name} has sessions still working. Close the project?`, { ok: 'Close' }))) return;
+    if (!state.projects.includes(project) || project.pinned) return;
+  }
   for (const pane of project.panes) {
     const v = views.get(pane.id);
     if (!v) continue;
@@ -2936,7 +2945,7 @@ async function newAgent(project: ProjectState) {
   ];
   const res = await api.addAgent(project.path, busy);
   if (!state.projects.includes(project)) return;
-  if (!res.ok) return void alert(`Could not open an agent: ${res.error}`);
+  if (!res.ok) return void tell(`Could not open an agent: ${res.error}`);
   if (state.activeProjectId !== project.id) activateProject(project.id);
   const v = addPane('claude', project, { cwd: res.cwd, branch: res.branch, name: res.name });
   if (!v) return;
@@ -2973,21 +2982,22 @@ function openTask(project: ProjectState, task: TaskState) {
   save();
 }
 
-function finishTask(project: ProjectState, task: TaskState) {
+async function finishTask(project: ProjectState, task: TaskState) {
   const v = task.paneId ? views.get(task.paneId) : undefined;
-  if (v && !closePane(v)) return;
+  if (v && !(await closePane(v))) return;
   task.paneId = undefined;
   setTaskStatus(project, task, 'done');
 }
 
 async function removeTaskWorktree(project: ProjectState, task: TaskState) {
   if (!task.worktree) return;
-  if (!confirm(`Remove the worktree of "${task.title}"?\n\n${task.worktree}\n\nThe branch ${task.branch} is kept.`)) return;
+  if (!(await askDialog(`Remove the worktree of "${task.title}"?\n\n${task.worktree}\n\nThe branch ${task.branch} is kept.`, { ok: 'Remove', danger: true }))) return;
+  if (!task.worktree) return;
   const v = task.paneId ? views.get(task.paneId) : undefined;
-  if (v && !closePane(v)) return;
+  if (v && !(await closePane(v))) return;
   const res = await api.removeWorktree(project.path, task.worktree);
   if (!res.ok) {
-    alert(`Git did not remove the worktree:\n\n${res.error}`);
+    void tell(`Git did not remove the worktree:\n\n${res.error}`);
     return;
   }
   task.worktree = undefined;
@@ -2996,8 +3006,8 @@ async function removeTaskWorktree(project: ProjectState, task: TaskState) {
   save();
 }
 
-function deleteTask(project: ProjectState, task: TaskState) {
-  if (task.worktree && !confirm(`Delete "${task.title}"? Its worktree stays on disk:\n\n${task.worktree}`)) return;
+async function deleteTask(project: ProjectState, task: TaskState) {
+  if (task.worktree && !(await askDialog(`Delete "${task.title}"? Its worktree stays on disk:\n\n${task.worktree}`, { ok: 'Delete', danger: true }))) return;
   project.tasks = project.tasks.filter((t) => t !== task);
   expandedTasks.delete(task.id);
   renderTasks();
@@ -3652,12 +3662,12 @@ async function sessionRowsMenu(rows: SessionRow[], at: MenuAnchor, shells: PaneV
       renderSessions();
       return save();
     case 'close':
-      if (!confirmClose(still)) return renderSessions();
-      for (const v of liveShells) closePane(v);
+      if (!(await confirmClose(still))) return renderSessions();
+      for (const v of liveShells) if (views.get(v.pane.id) === v) void closePane(v);
       await Promise.all(still.map((r) => closeSession(r, false)));
       return renderSessions();
     case 'archive':
-      if (!confirmClose(still)) return renderSessions();
+      if (!(await confirmClose(still))) return renderSessions();
       await Promise.all(still.map((r) => archiveSession(r, true, false)));
       return renderSessions();
     case 'unarchive':
@@ -3669,7 +3679,7 @@ async function sessionRowsMenu(rows: SessionRow[], at: MenuAnchor, shells: PaneV
 }
 
 /** One question for closing several sessions, asked only when one of them works or runs outside Liszt. */
-function confirmClose(rows: SessionRow[]): boolean {
+async function confirmClose(rows: SessionRow[]): Promise<boolean> {
   const busy = rows.filter((r) => (r.view ? isWorking(r.view) : r.live && r.dot === 'running'));
   const outside = rows.filter((r) => !r.view && r.live && !r.bgId);
   if (!busy.length && !outside.length) return true;
@@ -3677,7 +3687,7 @@ function confirmClose(rows: SessionRow[]): boolean {
     busy.length ? `${busy.length} still working` : '',
     outside.length ? `${outside.length} running outside Liszt` : '',
   ].filter(Boolean);
-  return confirm(`Close ${rows.length} sessions?\n\n${why.join(', ')}. Their conversations are kept and can be resumed.`);
+  return askDialog(`Close ${rows.length} sessions?\n\n${why.join(', ')}. Their conversations are kept and can be resumed.`, { ok: 'Close' });
 }
 
 async function sessionRowMenu(r: SessionRow, at: MenuAnchor) {
@@ -3738,7 +3748,7 @@ async function sessionAction(r: SessionRow, label: string, act: Promise<GitResul
   const res = await act;
   pendingSessions.delete(r.sessionId);
   renderSessions();
-  if (!res.ok) alert(`${label.replace('…', '')} "${r.title}" failed:\n\n${res.error}`);
+  if (!res.ok) void tell(`${label.replace('…', '')} "${r.title}" failed:\n\n${res.error}`);
   return res.ok;
 }
 
@@ -3752,7 +3762,7 @@ async function closeSession(r: SessionRow, ask = true): Promise<boolean> {
   if (!r.live) return true;
   const busy = r.dot === 'running';
   // Ending a process in another terminal or the Claude app is less expected than stopping an idle background session.
-  if (ask && (busy || !r.bgId) && !confirm(`Close "${r.title}"?\n\nIt runs outside Liszt${busy ? ' and is still working' : ''}. Its conversation is kept and can be resumed.`)) return false;
+  if (ask && (busy || !r.bgId) && !(await askDialog(`Close "${r.title}"?\n\nIt runs outside Liszt${busy ? ' and is still working' : ''}. Its conversation is kept and can be resumed.`, { ok: 'Close' }))) return false;
   if (!(await sessionAction(r, 'Closing…', api.closeSession(r.sessionId, r.bgId)))) return false;
   // Until the next poll: an interactive session is no longer listed, a background one is stopped.
   agents = agents.flatMap((a) => (a.sessionId !== r.sessionId ? [a] : a.kind === 'background' ? [{ ...a, ended: true, state: 'stopped' }] : []));
@@ -3789,11 +3799,11 @@ async function deleteSessions(rows: SessionRow[]) {
       }Their conversations are moved to the Trash and can no longer be resumed.${running ? `\n\n${running} running are closed first.` : ''}${
         inApp ? `\n\nThe Claude app keeps listing ${inApp} of them until you delete them there.` : ''
       }`;
-  if (!confirm(question)) return renderSessions();
+  if (!(await askDialog(question, { ok: 'Delete', danger: true }))) return renderSessions();
   await Promise.all(
     rows.map(async (r) => {
       // Claude Code deletes a background session itself; stopping it as well would race with that.
-      if (r.view) closePane(r.view, { ask: false, stop: false });
+      if (r.view) void closePane(r.view, { ask: false, stop: false });
       if (!(await sessionAction(r, 'Deleting…', api.deleteSession(r.sessionId, r.bgId)))) return;
       state.sessionMarks[r.sessionId] = { deleted: true, at: Date.now() };
       agents = agents.filter((a) => a.sessionId !== r.sessionId);
@@ -4380,7 +4390,7 @@ function onMenu(command: string) {
     case 'split-down':
       return void addPane('claude', activeProject(), { split: 'bottom' });
     case 'close-pane':
-      if (focused) closePane(focused);
+      if (focused) void closePane(focused);
       return;
     case 'new-project':
       return void newProject();
@@ -4390,7 +4400,7 @@ function onMenu(command: string) {
       return void addProject();
     case 'close-project': {
       const project = activeProject();
-      if (project) closeProject(project);
+      if (project) void closeProject(project);
       return;
     }
     case 'toggle-sidebar':
