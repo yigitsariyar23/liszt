@@ -47,9 +47,15 @@ rm -rf "$(getconf DARWIN_USER_CACHE_DIR)com.apple.dock.iconcache"
 # Only the installed copy is pinned in the Dock; the Dock takes it up when it restarts below.
 python3 -I scripts/pin-dock.py
 
-# The Dock restarts after Liszt is up: one that comes back while an app is still launching can
-# miss it, and the app then runs with no Dock icon at all.
-open "$APP"
-for _ in $(seq 20); do app_running && break; sleep 0.5; done
-sleep 1
+# The Dock restarts before Liszt opens, and Liszt opens only once the Dock is back and settled. A
+# Dock that comes back while an app is still launching misses it: the app then runs beside its pin
+# as an unpinned copy, or with no Dock icon at all.
+old_dock=$(pgrep -x Dock || true)
 killall Dock
+for _ in $(seq 20); do
+  dock=$(pgrep -x Dock || true)
+  [ -n "$dock" ] && [ "$dock" != "$old_dock" ] && break
+  sleep 0.5
+done
+sleep 3
+open "$APP"
