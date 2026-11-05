@@ -44,6 +44,9 @@ touch "$APP"
 "$LSREGISTER" -f "$APP"
 rm -rf "$(getconf DARWIN_USER_CACHE_DIR)com.apple.dock.iconcache"
 
+# Only the installed copy is pinned in the Dock; the Dock takes it up when it restarts below.
+python3 -I scripts/pin-dock.py
+
 # The Dock restarts after Liszt is up: one that comes back while an app is still launching can
 # miss it, and the app then runs with no Dock icon at all.
 open "$APP"
