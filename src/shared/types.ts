@@ -167,6 +167,8 @@ export interface SessionMark {
   archived?: boolean;
   /** Its row stays hidden unless something runs the session again. */
   deleted?: boolean;
+  /** Deleted in Liszt while Undo is offered; Claude Code is told only after that, or on the next start. */
+  undoable?: boolean;
   /** Unread while no Liszt pane has the session: marked so from its row, or its pane closed unread. Opening it reads it. */
   unread?: boolean;
   /** Its work went out: pushed to the remote, or its pull request merged. Cleared by the next prompt. */

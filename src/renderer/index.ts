@@ -40,6 +40,7 @@ import { h, iconEl } from './dom';
 import { ICONS, KIND_GLYPH } from './icons';
 import { leaf, panesIn, removePane, replacePane, splitPane, type Side } from './layout';
 import { ask as askDialog, tell } from './dialog';
+import { undoToast } from './toast';
 import { closeMenu, dropdown, showMenu, type MenuAnchor, type MenuEntry } from './menu';
 import { openSettings } from './settings';
 import { mediaLinks, openMedia, opensInViewer } from './viewer';
@@ -3781,7 +3782,13 @@ async function archiveSession(r: SessionRow, archived: boolean, ask = true) {
   save();
 }
 
-/** Deletes the sessions after one question, all at once. */
+/** Sessions deleted while Undo is offered, with the mark each had before, which Undo puts back. */
+const undoMarks = new Map<string, SessionMark | undefined>();
+
+/**
+ * Deletes the sessions after one question, all at once. They are closed and leave the panel at
+ * once, and a notice offers to undo that; Claude Code deletes them only when it is gone.
+ */
 async function deleteSessions(rows: SessionRow[]) {
   const one = rows.length === 1 ? rows[0] : undefined;
   const bg = rows.filter((r) => r.bgId);
@@ -3791,24 +3798,88 @@ async function deleteSessions(rows: SessionRow[]) {
   const question = one
     ? `Delete "${one.title}"?\n\n${
         one.bgId ? `Claude Code removes the background session ${one.bgId} (claude rm), and its worktree when nothing would be lost. ` : ''
-      }Its conversation is moved to the Trash and can no longer be resumed.${running ? '\n\nIt is closed first.' : ''}${
+      }Its conversation is moved to the Trash and can no longer be resumed. Undo is offered for a few seconds.${running ? '\n\nIt is closed first.' : ''}${
         inApp ? '\n\nThe Claude app keeps listing it until you delete it there.' : ''
       }`
     : `Delete ${rows.length} sessions?\n\n${
         bg.length ? `Claude Code removes ${bg.length} background sessions (claude rm), and their worktrees when nothing would be lost. ` : ''
-      }Their conversations are moved to the Trash and can no longer be resumed.${running ? `\n\n${running} running are closed first.` : ''}${
+      }Their conversations are moved to the Trash and can no longer be resumed. Undo is offered for a few seconds.${running ? `\n\n${running} running are closed first.` : ''}${
         inApp ? `\n\nThe Claude app keeps listing ${inApp} of them until you delete them there.` : ''
       }`;
   if (!(await askDialog(question, { ok: 'Delete', danger: true }))) return renderSessions();
+  // Closed now, so nothing runs them while Undo is offered; the conversations are kept until then.
+  const closed = await Promise.all(rows.map((r) => (r.view ? closePane(r.view, { ask: false }) : closeSession(r, false))));
+  const gone = rows.filter((r, i) => closed[i] && !undoMarks.has(r.sessionId));
+  if (!gone.length) return renderSessions();
+  for (const r of gone) {
+    undoMarks.set(r.sessionId, state.sessionMarks[r.sessionId]);
+    // What it had is kept, so a delete that fails on the next start can give it back.
+    state.sessionMarks[r.sessionId] = { ...state.sessionMarks[r.sessionId], deleted: true, undoable: true, at: Date.now() };
+  }
+  // Until the next poll, as closeSession does: a closed pane's background session would otherwise be listed as running elsewhere.
+  const ids = new Set(gone.map((r) => r.sessionId));
+  agents = agents.flatMap((a) => (!ids.has(a.sessionId) ? [a] : a.kind === 'background' ? [{ ...a, ended: true, state: 'stopped' }] : []));
+  renderSessions();
+  save();
+  undoToast({
+    message: gone.length === 1 ? `Deleted "${gone[0].title}"` : `Deleted ${gone.length} sessions`,
+    undo: () => {
+      const back = gone.filter((r) => undoMarks.has(r.sessionId));
+      undoDelete(back);
+      // A Liszt pane opens again on its conversation; one that ran elsewhere stays closed, to be resumed from its row.
+      for (const r of back) if (r.view) void openSession(r.cwd, r.sessionId, r.title, r.bgId);
+    },
+    expire: () => void finishDelete(gone),
+  });
+}
+
+/** Puts the sessions' rows back as they were. */
+function undoDelete(rows: SessionRow[]) {
+  for (const r of rows) {
+    if (!undoMarks.has(r.sessionId)) continue;
+    const mark = undoMarks.get(r.sessionId);
+    undoMarks.delete(r.sessionId);
+    if (mark) state.sessionMarks[r.sessionId] = mark;
+    else delete state.sessionMarks[r.sessionId];
+  }
+  renderSessions();
+  save();
+}
+
+/** Has Claude Code delete the sessions once Undo is no longer offered; one that fails comes back. */
+async function finishDelete(rows: SessionRow[]) {
   await Promise.all(
     rows.map(async (r) => {
-      // Claude Code deletes a background session itself; stopping it as well would race with that.
-      if (r.view) void closePane(r.view, { ask: false, stop: false });
-      if (!(await sessionAction(r, 'Deleting…', api.deleteSession(r.sessionId, r.bgId)))) return;
-      state.sessionMarks[r.sessionId] = { deleted: true, at: Date.now() };
-      agents = agents.filter((a) => a.sessionId !== r.sessionId);
-      // A task would otherwise resume the deleted conversation; it starts a new one in its worktree instead.
-      for (const project of state.projects) for (const task of project.tasks) if (task.sessionId === r.sessionId) task.sessionId = undefined;
+      if (!undoMarks.has(r.sessionId)) return;
+      if (await sessionAction(r, 'Deleting…', api.deleteSession(r.sessionId, r.bgId))) deleted(r.sessionId);
+      else {
+        undoDelete([r]);
+        return;
+      }
+      undoMarks.delete(r.sessionId);
+    }),
+  );
+  renderSessions();
+  save();
+}
+
+function deleted(sessionId: string) {
+  state.sessionMarks[sessionId] = { deleted: true, at: Date.now() };
+  agents = agents.filter((a) => a.sessionId !== sessionId);
+  // A task would otherwise resume the deleted conversation; it starts a new one in its worktree instead.
+  for (const project of state.projects) for (const task of project.tasks) if (task.sessionId === sessionId) task.sessionId = undefined;
+}
+
+/** Deletes left waiting for their Undo when Liszt quit are carried out on the next start. */
+async function finishLeftDeletes() {
+  const left = Object.entries(state.sessionMarks).filter(([, m]) => m.deleted && m.undoable);
+  if (!left.length) return;
+  await Promise.all(
+    left.map(async ([sessionId]) => {
+      const res = await api.deleteSession(sessionId);
+      if (res.ok) return deleted(sessionId);
+      const { deleted: _d, undoable: _u, ...kept } = state.sessionMarks[sessionId];
+      state.sessionMarks[sessionId] = kept;
     }),
   );
   renderSessions();
@@ -4685,6 +4756,7 @@ async function boot() {
     void pump(project);
   }
   renderSessions();
+  void finishLeftDeletes();
 }
 
 void boot();
