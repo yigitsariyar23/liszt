@@ -317,6 +317,9 @@ const KEYMAP: Array<[(e: KeyboardEvent, v: PaneView) => boolean, string]> = [
   [(e) => e.key === 'Backspace' && e.metaKey, '\x15'],
   [(e) => e.key === 'ArrowLeft' && e.altKey && !e.metaKey, '\x1bb'],
   [(e) => e.key === 'ArrowRight' && e.altKey && !e.metaKey, '\x1bf'],
+  // Option+Up and Option+Down go to the start and end of the line in Claude's prompt, as Cmd+Left and Cmd+Right do.
+  [(e, v) => v.pane.kind === 'claude' && e.key === 'ArrowUp' && e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey, '\x01'],
+  [(e, v) => v.pane.kind === 'claude' && e.key === 'ArrowDown' && e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey, '\x05'],
   [(e) => e.key === 'Backspace' && e.altKey && !e.metaKey, '\x17'],
 ];
 
