@@ -375,6 +375,7 @@ ipcMain.handle('settings:get', () => settings);
 ipcMain.handle('settings:set', (_e, next: Settings) => {
   settings = { projectFolders: [...next.projectFolders], shortcuts: { ...next.shortcuts }, claudeView: next.claudeView === 'chat' ? 'chat' : 'terminal' };
   fs.writeFileSync(settingsPath(), JSON.stringify(settings, null, 2));
+  watchProjectFolders();
   buildMenu();
   return settings;
 });
@@ -452,6 +453,27 @@ function pinnedProjects(): PinnedProjects {
 }
 
 ipcMain.handle('projects:pinned', () => pinnedProjects());
+
+// A folder made or removed in a project folder (a new project, an agent checkout) is picked up
+// right away, so the projects tree follows it while Liszt stays in front.
+let folderWatchers: fs.FSWatcher[] = [];
+let foldersChanged: NodeJS.Timeout | undefined;
+function watchProjectFolders() {
+  for (const w of folderWatchers) w.close();
+  folderWatchers = [];
+  for (const root of settings.projectFolders) {
+    try {
+      const w = fs.watch(root, () => {
+        clearTimeout(foldersChanged);
+        foldersChanged = setTimeout(() => send('projects:changed'), 500);
+      });
+      w.on('error', () => w.close());
+      folderWatchers.push(w);
+    } catch {
+      // A project folder that does not exist yet is read again when Settings change.
+    }
+  }
+}
 
 // --- Terminals ---------------------------------------------------------------------------------
 // A shell pane runs the login shell in Liszt's terminal host (see terms.ts), so it outlives Liszt;
@@ -1921,6 +1943,7 @@ app.whenReady().then(() => {
   writeMoveScript();
   loadNotifyPrefs();
   loadSettings();
+  watchProjectFolders();
   hookUrl = startHookServer();
   protocol.handle(MEDIA_SCHEME, serveMedia);
   // A socket path must stay short (macOS allows 104 bytes), so it sits right in userData.

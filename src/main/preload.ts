@@ -81,6 +81,7 @@ const api = {
   newProjectFolder: (): Promise<string> => ipcRenderer.invoke('projects:incubator'),
   quickChatFolder: (): Promise<string> => ipcRenderer.invoke('projects:quick-chat'),
   pinnedProjects: (): Promise<PinnedProjects> => ipcRenderer.invoke('projects:pinned'),
+  onProjectsChanged: (cb: () => void) => on('projects:changed', cb),
   settings: (): Promise<Settings> => ipcRenderer.invoke('settings:get'),
   setSettings: (settings: Settings): Promise<Settings> => ipcRenderer.invoke('settings:set', settings),
   /** The next key combination pressed: an accelerator, '' to clear the shortcut, or null when cancelled. */

@@ -4724,6 +4724,7 @@ taskInput.addEventListener('keydown', (e) => {
 });
 window.addEventListener('focus', () => void refreshGit());
 window.addEventListener('focus', () => Date.now() - pinnedAt > 30_000 && void syncPinned());
+api.onProjectsChanged(() => void syncPinned());
 window.addEventListener('focus', () => void refreshJobs());
 setInterval(() => void refreshJobs(), JOBS_INTERVAL);
 setInterval(() => void refreshGit(), 5000);
