@@ -1380,18 +1380,51 @@ ipcMain.handle('paths:resolve', (_e, candidates: string[], cwd: string) =>
   }),
 );
 
-// A path clicked in a pane: a folder opens in Finder and a file shows selected in its folder, or
-// either opens in VS Code, a file at the line printed after it.
-ipcMain.on('open:location', (_e, target: string, cwd: string, app: 'finder' | 'code') => {
-  const at = onDisk(target, cwd);
-  if (!at) return;
-  if (app === 'code') {
-    if (at.line) void shell.openExternal(`vscode://file${encodeURI(at.file)}:${at.line}${at.col ? `:${at.col}` : ''}`);
+/** VS Code's command line tool, from the app itself or where its installer links it; null when none is found. */
+function vscodeCli(): string | null {
+  const apps = ['/Applications', path.join(os.homedir(), 'Applications')];
+  const candidates = [
+    ...apps.map((d) => path.join(d, 'Visual Studio Code.app/Contents/Resources/app/bin/code')),
+    '/opt/homebrew/bin/code',
+    '/usr/local/bin/code',
+  ];
+  return candidates.find((c) => fs.existsSync(c)) ?? null;
+}
+
+const inside = (file: string, dir: string) => {
+  const rel = path.relative(dir, file);
+  return !rel.startsWith('..') && !path.isAbsolute(rel);
+};
+
+/**
+ * Opens a path in VS Code with the folder it belongs to as the window's folder: the project's, or
+ * the pane's own folder (an agent checkout) when the path is in that one instead. A file opens in
+ * that window, at the line printed after it; a path in neither opens on its own.
+ */
+function openInCode(at: { file: string; line?: string; col?: string }, roots: string[]) {
+  const root = roots.find((r) => r && inside(at.file, r));
+  const isDir = fs.statSync(at.file).isDirectory();
+  const cli = vscodeCli();
+  const goto = `${at.file}${at.line ? `:${at.line}${at.col ? `:${at.col}` : ''}` : ''}`;
+  const fallback = () => {
+    if (at.line) void shell.openExternal(`vscode://file${encodeURI(goto)}`);
     else
-      execFile('open', ['-b', 'com.microsoft.VSCode', at.file], (err) => {
+      execFile('open', ['-b', 'com.microsoft.VSCode', root ?? at.file], (err) => {
         if (err) void shell.openPath(at.file);
       });
-  } else if (fs.statSync(at.file).isDirectory()) void shell.openPath(at.file);
+  };
+  if (!cli) return fallback();
+  const args = root ? (isDir ? [root] : [root, '-g', goto]) : isDir ? [at.file] : ['-g', goto];
+  execFile(cli, args, { env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined } }, (err) => err && fallback());
+}
+
+// A path clicked in a pane: a folder opens in Finder and a file shows selected in its folder, or
+// either opens in VS Code inside the project's folder.
+ipcMain.on('open:location', (_e, target: string, cwd: string, opener: 'finder' | 'code', project?: string) => {
+  const at = onDisk(target, cwd);
+  if (!at) return;
+  if (opener === 'code') openInCode(at, [project ?? '', cwd]);
+  else if (fs.statSync(at.file).isDirectory()) void shell.openPath(at.file);
   else shell.showItemInFolder(at.file);
 });
 

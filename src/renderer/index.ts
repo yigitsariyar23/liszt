@@ -378,7 +378,7 @@ function createView(project: ProjectState, pane: PaneState): PaneView {
       answer: (id, a) => answerAsk(v, id, a),
       interrupt: () => api.chatInterrupt(pane.id),
       setMode: (mode) => api.chatMode(pane.id, mode),
-      openLink: (target, e) => openLink(target, cwdOf(v), e),
+      openLink: (target, e) => openLink(target, v, e),
       key: () => false,
       wheel: (e) => {
         if (!e.metaKey) return false;
@@ -461,11 +461,13 @@ const cwdOf = (v: PaneView) => v.pane.cwd ?? v.project.path;
 
 /**
  * A link clicked in a pane: an image or video shows in the viewer, a web page in the browser, any
- * other local path in Finder. Ctrl-, Cmd- or Shift-click opens a local path, media too, in VS Code.
+ * other local path in Finder. Ctrl-, Cmd- or Shift-click opens a local path, media too, in VS Code,
+ * in a window on the project's folder.
  */
-function openLink(uri: string, cwd: string, e?: MouseEvent) {
+function openLink(uri: string, v: PaneView, e?: MouseEvent) {
+  const cwd = cwdOf(v);
   const local = isLocalTarget(uri);
-  if (local && (e?.ctrlKey || e?.metaKey || e?.shiftKey)) api.openLocation(uri, cwd, 'code');
+  if (local && (e?.ctrlKey || e?.metaKey || e?.shiftKey)) api.openLocation(uri, cwd, 'code', v.project.path);
   else if (opensInViewer(uri)) openMedia(api, uri, cwd);
   else if (local) api.openLocation(uri, cwd, 'finder');
   else api.openExternal(uri);
@@ -485,15 +487,15 @@ function ensureTerminal(v: PaneView): Terminal {
     macOptionClickForcesSelection: true,
     theme: THEME,
     // OSC 8 links a program prints: images and videos open in the viewer, web pages in the browser.
-    linkHandler: { activate: (e, uri) => openLink(uri, cwdOf(v), e), allowNonHttpProtocols: true },
+    linkHandler: { activate: (e, uri) => openLink(uri, v, e), allowNonHttpProtocols: true },
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
   term.loadAddon(new Unicode11Addon());
   term.unicode.activeVersion = '11';
-  term.loadAddon(new WebLinksAddon((_e, uri) => openLink(uri, cwdOf(v))));
-  term.registerLinkProvider(mediaLinks(term, (e, target) => openLink(target, cwdOf(v), e)));
-  term.registerLinkProvider(pathLinks(term, api, () => cwdOf(v), (e, target) => openLink(target, cwdOf(v), e)));
+  term.loadAddon(new WebLinksAddon((_e, uri) => openLink(uri, v)));
+  term.registerLinkProvider(mediaLinks(term, (e, target) => openLink(target, v, e)));
+  term.registerLinkProvider(pathLinks(term, api, () => cwdOf(v), (e, target) => openLink(target, v, e)));
   // On a Mac ⌃-click also arrives as a right-click, which xterm answers by selecting the word under
   // it; a ⌃-click here opens a link in VS Code instead.
   v.termHost.addEventListener('contextmenu', (e) => e.ctrlKey && e.button === 0 && e.stopPropagation(), true);

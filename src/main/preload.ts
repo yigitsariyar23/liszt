@@ -98,7 +98,8 @@ const api = {
   /** For each candidate path, the length of its longest part that exists on disk, or 0. */
   resolvePaths: (candidates: string[], cwd: string): Promise<number[]> => ipcRenderer.invoke('paths:resolve', candidates, cwd),
   /** Opens a local path in Finder (a file shows selected in its folder) or in VS Code. */
-  openLocation: (target: string, cwd: string, app: 'finder' | 'code') => ipcRenderer.send('open:location', target, cwd, app),
+  openLocation: (target: string, cwd: string, app: 'finder' | 'code', project?: string) =>
+    ipcRenderer.send('open:location', target, cwd, app, project),
   notify: (n: { title: string; body: string; paneId: string; kind: NotifyKind }) => ipcRenderer.send('notify', n),
   setBadge: (text: string) => ipcRenderer.send('badge', text),
   onData: (cb: (id: string, data: string) => void) => on('pty:data', cb),
