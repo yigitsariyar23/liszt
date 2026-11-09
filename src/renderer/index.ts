@@ -2963,6 +2963,10 @@ async function startTask(project: ProjectState, task: TaskState, byHand: boolean
  * in, `<repo>-agentN` beside the repo, made on `agent/agentN` when it does not exist yet.
  */
 async function newAgent(project: ProjectState) {
+  const had = projectAgents[project.path]?.length ?? 0;
+  const existing = had ? `${project.name} has ${had} ${had === 1 ? 'agent checkout' : 'agent checkouts'}; a free one is reused, otherwise a new one is made.` : 'A new checkout is made beside the project, a full copy of the repository that can take minutes for a big one.';
+  const sure = await askDialog(`Open a new agent in ${project.name}?\n\nThe agent works in its own checkout, ${folderName(project.path)}-agentN on agent/agentN. ${existing}`, { ok: 'Open Agent' });
+  if (!sure || !state.projects.includes(project)) return;
   const busy = [
     ...[...views.values()].filter((v) => v.pane.kind === 'claude').map((v) => v.pane.cwd ?? v.project.path),
     ...agents.filter((a) => !a.ended).map((a) => a.cwd),
