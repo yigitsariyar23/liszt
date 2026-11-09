@@ -2116,11 +2116,19 @@ function treeGroup(group: ProjectGroup, members: ProjectState[], byProject: Map<
 function treeProject(p: ProjectState, sessions: TreeSession[], searching: boolean): HTMLElement[] {
   const open = searching ? sessions.length > 0 : (p.treeOpen ?? (p.id === state.activeProjectId || p.panes.length > 0));
   const row = h('div', `ptree-row${p.id === state.activeProjectId ? ' active' : ''}`);
-  row.title = `${p.name}\n${p.path}\n${sessions.length ? `Double-click to ${open ? 'fold' : 'unfold'} its sessions, right` : 'Right'}-click for more`;
+  const agents = projectAgents[p.path] ?? [];
+  const agentsLine = agents.length ? `\n${agents.length} ${agents.length === 1 ? 'agent' : 'agents'}: ${agents.join(', ')}` : '';
+  row.title = `${p.name}\n${p.path}${agentsLine}\n${sessions.length ? `Double-click to ${open ? 'fold' : 'unfold'} its sessions, right` : 'Right'}-click for more`;
   const name = h('span', 'tab-name', p.name);
   const add = iconEl(ICONS.plus, 'ptree-add');
   add.title = withKey('New Claude session', 'new-claude');
   row.append(projectIcon(p), name, add);
+  if (agents.length) {
+    const badge = iconEl(ICONS.agent, 'ptree-agents');
+    badge.append(String(agents.length));
+    badge.title = agentsLine.trim();
+    row.append(badge);
+  }
   // Folded, the count says how many sessions are tucked away under it.
   if (!open && sessions.length) row.append(h('span', 'tab-count', String(sessions.length)));
   row.append(h('span', `dot ${projectStatus(p)}`));
@@ -2723,13 +2731,16 @@ const folderName = (dir: string) => dir.split('/').filter(Boolean).pop() ?? dir;
 // opened on its own, its tab leads the row and it cannot be closed. Folders made since are picked up
 // when the window comes back to the front; a pinned folder that is gone becomes an ordinary project.
 let pinnedAt = 0;
+/** Agent checkouts beside each pinned project, by the project's folder. */
+let projectAgents: Record<string, string[]> = {};
 
 async function syncPinned() {
   pinnedAt = Date.now();
   const list = await api.pinnedProjects();
   const dirs = new Set(list.dirs);
-  let changed = list.roots.join('\n') !== pinnedRoots.join('\n');
+  let changed = list.roots.join('\n') !== pinnedRoots.join('\n') || JSON.stringify(list.agents) !== JSON.stringify(projectAgents);
   pinnedRoots = list.roots;
+  projectAgents = list.agents;
   for (const p of state.projects) {
     const pinned = dirs.has(p.path);
     if (Boolean(p.pinned) !== pinned) changed = true;

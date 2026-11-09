@@ -289,6 +289,8 @@ export interface Settings {
 export interface PinnedProjects {
   roots: string[];
   dirs: string[];
+  /** Agent checkouts beside a project's folder (<project>-agentN), by the project's folder: `agent1`, `agent2`. */
+  agents: Record<string, string[]>;
 }
 
 export type SessionFilter = 'active' | 'liszt' | 'running' | 'unread' | 'pinned' | 'archived' | 'all';

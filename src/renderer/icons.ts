@@ -11,6 +11,7 @@ export const ICONS = {
   tasks: icon('<path d="M7 4h6.5M7 8h6.5M7 12h6.5M2.3 4l1 1 1.7-2M2.3 8l1 1 1.7-2M2.3 12l1 1 1.7-2"/>'),
   sessions: icon('<rect x="1.8" y="2.5" width="12.4" height="4.5" rx="1.5"/><rect x="1.8" y="9" width="12.4" height="4.5" rx="1.5"/><path d="M4.6 4.75h.01M4.6 11.25h.01M7 4.75h4.4M7 11.25h4.4"/>'),
   pin: icon('<path d="M5.5 2.5h5M6.5 2.5v3.8L4.6 9h6.8L9.5 6.3V2.5M8 9v4.5"/>'),
+  agent: icon('<rect x="2.8" y="5" width="10.4" height="8" rx="2"/><path d="M8 5V2.6M6 8.6v.8M10 8.6v.8"/>'),
   plus: icon('<path d="M8 3.2v9.6M3.2 8h9.6"/>'),
   newProject: icon('<path d="M14 7.4V6.6A1.5 1.5 0 0 0 12.5 5.1H7.7L6.2 3.5H3.5A1.5 1.5 0 0 0 2 5v6.5A1.5 1.5 0 0 0 3.5 13h4.3M12 9.6v4.2M9.9 11.7h4.2"/>'),
   quickChat: icon('<path d="M2.5 4.2A1.7 1.7 0 0 1 4.2 2.5h7.6a1.7 1.7 0 0 1 1.7 1.7v5a1.7 1.7 0 0 1-1.7 1.7H7.2L4.4 13.3v-2.4h-.2a1.7 1.7 0 0 1-1.7-1.7z"/><path d="M8.6 4.4 6.6 7h2.8L7.4 9.6"/>'),

@@ -419,8 +419,11 @@ function recordKey(event: Electron.Event, input: Electron.Input) {
 // already there, so they are left out, as are hidden folders, `_archive_`-style folders, `archive`
 // and Playable Studio's `studio` folder of Unity copies.
 
+const AGENT_DIR = /^(.+)-(agent\d+)$/;
+
 function pinnedProjects(): PinnedProjects {
   const dirs: string[] = [];
+  const agents: Record<string, string[]> = {};
   for (const root of settings.projectFolders) {
     let entries: fs.Dirent[];
     try {
@@ -431,11 +434,21 @@ function pinnedProjects(): PinnedProjects {
     for (const e of entries) {
       if (!e.isDirectory() || /^[._]/.test(e.name) || e.name === 'archive' || e.name === 'studio') continue;
       const dir = path.join(root, e.name);
-      if (fs.statSync(path.join(dir, '.git'), { throwIfNoEntry: false })?.isFile()) continue;
+      if (fs.statSync(path.join(dir, '.git'), { throwIfNoEntry: false })?.isFile()) {
+        // An agent checkout counts for the project it sits beside, the layout `/open-agents` makes.
+        const m = AGENT_DIR.exec(e.name);
+        if (m) (agents[path.join(root, m[1])] ??= []).push(m[2]);
+        continue;
+      }
       dirs.push(dir);
     }
   }
-  return { roots: settings.projectFolders, dirs };
+  const byNumber = (a: string, b: string) => Number(a.slice(5)) - Number(b.slice(5));
+  for (const dir of Object.keys(agents)) {
+    if (dirs.includes(dir)) agents[dir].sort(byNumber);
+    else delete agents[dir];
+  }
+  return { roots: settings.projectFolders, dirs, agents };
 }
 
 ipcMain.handle('projects:pinned', () => pinnedProjects());

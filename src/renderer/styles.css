@@ -1220,6 +1220,25 @@ body[data-projects='sidebar'][data-side='sessions'] #sessionbar {
   color: var(--text);
 }
 
+/* How many agent checkouts the project has beside its folder. */
+.ptree-agents {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+  padding: 0 5px 0 4px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 15px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.ptree-agents svg {
+  width: 10px;
+  height: 10px;
+}
+
 .ptree-sessions {
   margin: 0 0 4px 17px;
   border-left: 1px solid var(--border);
