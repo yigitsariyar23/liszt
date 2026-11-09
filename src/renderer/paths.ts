@@ -2,7 +2,7 @@ import type { ILink, ILinkProvider, Terminal } from '@xterm/xterm';
 import type { LisztApi } from '../main/preload';
 import { logicalLine } from './viewer';
 
-// Local paths a terminal prints, made clickable: a click shows the place in Finder, a Ctrl-, Cmd- or
+// Local paths a terminal prints, made clickable: a click shows the place in Finder, a Cmd- or
 // Shift-click opens it in VS Code. Only a path that exists on disk becomes a link, so a slash command or a
 // fraction stays plain text, and a path may hold spaces (`~/Creative Studio v2/exports/`).
 
