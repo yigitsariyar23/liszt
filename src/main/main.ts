@@ -13,6 +13,7 @@ import { HOST_PROTOCOL, TERM_PROTOCOL } from '../shared/types';
 import { acceleratorOf, shortcutFor } from '../shared/shortcuts';
 import { MEDIA_SCHEME, mediaType } from '../shared/media';
 import type {
+  AgentRemoveResult,
   AgentResult,
   AgentSession,
   ChatAnswer,
@@ -1602,6 +1603,43 @@ ipcMain.handle('agent:add', async (_e, project: string, busy: string[]): Promise
       return { ok: true, name, dir, cwd: path.join(dir, repo.sub), branch };
     }
     return { ok: false, error: 'Every agent checkout up to agent99 is in use.' };
+  } catch (err) {
+    return { ok: false, error: errorText(err) };
+  }
+});
+
+/**
+ * Removes an agent checkout and its agent/agentN branch. Unless forced it refuses when that would
+ * lose work: uncommitted files, or commits no other branch or remote has.
+ */
+ipcMain.handle('agent:remove', async (_e, project: string, name: string, force: boolean): Promise<AgentRemoveResult> => {
+  try {
+    if (!/^agent\d+$/.test(name)) return { ok: false, error: `${name} is not an agent.` };
+    const repo = await repoOf(project);
+    if (!repo) return { ok: false, error: `${project} is not in a git repository.` };
+    const dir = path.join(path.dirname(repo.root), `${path.basename(repo.root)}-${name}`);
+    const listed = (await runGit(repo.root, ['worktree', 'list', '--porcelain']))
+      .split('\n')
+      .filter((l) => l.startsWith('worktree '))
+      .map((l) => l.slice('worktree '.length))
+      .some((d) => fs.existsSync(d) && fs.realpathSync(d) === (fs.existsSync(dir) ? fs.realpathSync(dir) : dir));
+    if (!listed) return { ok: false, error: `${dir} is not a checkout of this repository.` };
+    const branch = (await runGit(dir, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+    const own = branch === `agent/${name}`;
+    if (!force) {
+      const unsafe: string[] = [];
+      const dirty = (await runGit(dir, ['status', '--porcelain'])).split('\n').filter(Boolean).length;
+      if (dirty) unsafe.push(`${dirty} uncommitted ${dirty === 1 ? 'file' : 'files'}`);
+      const only = Number(
+        (await runGit(dir, ['rev-list', '--count', 'HEAD', '--not', ...(own ? [`--exclude=${branch}`] : []), '--branches', '--remotes'])).trim(),
+      );
+      if (only) unsafe.push(`${only} ${only === 1 ? 'commit' : 'commits'} only on ${branch}`);
+      if (unsafe.length) return { ok: false, error: 'The agent holds work of its own.', unsafe };
+    }
+    await runGit(repo.root, ['worktree', 'remove', ...(force ? ['--force', '--force'] : []), dir], 5 * 60_000);
+    // The branch goes with it; its commits are on another branch, or the user chose to lose them.
+    if (own) await runGit(repo.root, ['branch', '-D', branch]).catch(() => {});
+    return { ok: true };
   } catch (err) {
     return { ok: false, error: errorText(err) };
   }

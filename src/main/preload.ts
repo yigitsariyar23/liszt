@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { EffortLevel, ModelInfo, PermissionMode } from '@anthropic-ai/claude-agent-sdk';
 import type {
+  AgentRemoveResult,
   AgentResult,
   AgentSession,
   AppSession,
@@ -73,6 +74,7 @@ const api = {
   removeWorktree: (project: string, dir: string): Promise<GitResult> => ipcRenderer.invoke('worktree:remove', project, dir),
   repoOf: (dirs: string[]): Promise<(RepoOf | null)[]> => ipcRenderer.invoke('repo:of', dirs),
   addAgent: (project: string, busy: string[]): Promise<AgentResult> => ipcRenderer.invoke('agent:add', project, busy),
+  removeAgent: (project: string, name: string, force: boolean): Promise<AgentRemoveResult> => ipcRenderer.invoke('agent:remove', project, name, force),
   projectIcon: (dir: string): Promise<ProjectIcon> => ipcRenderer.invoke('project:icon', dir),
   pickIcon: (): Promise<string | null> => ipcRenderer.invoke('dialog:pickIcon'),
   closeSession: (sessionId: string, bgId?: string): Promise<GitResult> => ipcRenderer.invoke('sessions:close', sessionId, bgId),

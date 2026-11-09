@@ -2643,6 +2643,17 @@ async function projectMenu(project: ProjectState, at: MenuAnchor) {
     { label: 'Detect Icon Again', id: 'icon-detect' },
     'separator',
     { label: 'New Agent Session', id: 'agent', key: 't' },
+  );
+  const agentNames = projectAgents[project.path] ?? [];
+  if (agentNames.length) entries.push({
+    label: 'Remove Agent',
+    key: 'x',
+    submenu: agentNames.map((n) => {
+      const busy = agentInUse(project, n);
+      return { label: busy ? `${n} (in use)` : n, id: `remove-agent:${n}`, enabled: !busy, danger: true };
+    }),
+  });
+  entries.push(
     { label: 'Open Terminal Here', id: 'shell', key: 's' },
     { label: 'Reveal in Finder', id: 'reveal', key: 'f' },
     'separator',
@@ -2651,6 +2662,7 @@ async function projectMenu(project: ProjectState, at: MenuAnchor) {
   const choice = await showMenu(entries, at);
   // The project may have been closed while the menu was open.
   if (!choice || !state.projects.includes(project)) return;
+  if (choice.startsWith('remove-agent:')) return void removeAgent(project, choice.slice('remove-agent:'.length));
   if (choice.startsWith('group:')) {
     const group = state.groups.find((g) => g.id === choice.slice('group:'.length));
     if (group) joinGroup(project, group);
@@ -2958,6 +2970,44 @@ async function startTask(project: ProjectState, task: TaskState, byHand: boolean
   save();
 }
 
+/** Folders a Claude session works in: Liszt's panes and every running session on the machine. */
+function claudeDirs(): string[] {
+  return [
+    ...[...views.values()].filter((v) => v.pane.kind === 'claude').map((v) => v.pane.cwd ?? v.project.path),
+    ...agents.filter((a) => !a.ended).map((a) => a.cwd),
+  ];
+}
+
+/** An agent's checkout beside the project's folder, as `/open-agents` lays them out. */
+const agentDir = (project: ProjectState, name: string) => `${parentDir(project.path)}/${folderName(project.path)}-${name}`;
+
+/** Whether a Claude session works in the agent's checkout. */
+function agentInUse(project: ProjectState, name: string): boolean {
+  const dir = agentDir(project, name);
+  return claudeDirs().some((d) => samePath(d, dir) || trimPath(d).startsWith(`${dir}/`));
+}
+
+/** Removes an agent's checkout and branch, after asking; work it would lose is named and asked about again. */
+async function removeAgent(project: ProjectState, name: string) {
+  if (agentInUse(project, name)) return void tell(`${name} is in use.\n\nA Claude session works in ${agentDir(project, name)}. Close it first.`);
+  const sure = await askDialog(`Remove ${name} from ${project.name}?\n\nIts checkout ${agentDir(project, name)} and its branch agent/${name} are deleted.`, {
+    ok: 'Remove Agent',
+    danger: true,
+  });
+  if (!sure) return;
+  let res = await api.removeAgent(project.path, name, false);
+  if (!res.ok && res.unsafe) {
+    const anyway = await askDialog(`${name} holds work that would be lost.\n\n${res.unsafe.join('\n')}\n\nThis cannot be undone.`, {
+      ok: 'Delete Anyway',
+      danger: true,
+    });
+    if (!anyway) return;
+    res = await api.removeAgent(project.path, name, true);
+  }
+  if (!res.ok) return void tell(`Could not remove ${name}.\n\n${res.error}`);
+  void syncPinned();
+}
+
 /**
  * Opens a Claude session in the lowest agent checkout of the project's repository no session works
  * in, `<repo>-agentN` beside the repo, made on `agent/agentN` when it does not exist yet.
@@ -2967,11 +3017,7 @@ async function newAgent(project: ProjectState) {
   const existing = had ? `${project.name} has ${had} ${had === 1 ? 'agent checkout' : 'agent checkouts'}; a free one is reused, otherwise a new one is made.` : 'A new checkout is made beside the project, a full copy of the repository that can take minutes for a big one.';
   const sure = await askDialog(`Open a new agent in ${project.name}?\n\nThe agent works in its own checkout, ${folderName(project.path)}-agentN on agent/agentN. ${existing}`, { ok: 'Open Agent' });
   if (!sure || !state.projects.includes(project)) return;
-  const busy = [
-    ...[...views.values()].filter((v) => v.pane.kind === 'claude').map((v) => v.pane.cwd ?? v.project.path),
-    ...agents.filter((a) => !a.ended).map((a) => a.cwd),
-  ];
-  const res = await api.addAgent(project.path, busy);
+  const res = await api.addAgent(project.path, claudeDirs());
   if (!state.projects.includes(project)) return;
   if (!res.ok) return void tell(`Could not open an agent: ${res.error}`);
   if (state.activeProjectId !== project.id) activateProject(project.id);

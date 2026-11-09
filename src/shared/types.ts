@@ -357,6 +357,9 @@ export interface RepoOf {
   branch: string;
 }
 
+/** Removing an agent checkout; `unsafe` lists the work it would lose, and nothing was removed. */
+export type AgentRemoveResult = { ok: true } | { ok: false; error: string; unsafe?: string[] };
+
 export type AgentResult = { ok: true; name: string; dir: string; cwd: string; branch: string } | { ok: false; error: string };
 
 /** Where a moved session's transcript now is, so the session resumes from its new folder. */
