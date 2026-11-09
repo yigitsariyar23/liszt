@@ -461,11 +461,11 @@ const cwdOf = (v: PaneView) => v.pane.cwd ?? v.project.path;
 
 /**
  * A link clicked in a pane: an image or video shows in the viewer, a web page in the browser, any
- * other local path in Finder. Shift-click opens a local path, media too, in VS Code.
+ * other local path in Finder. Ctrl-, Cmd- or Shift-click opens a local path, media too, in VS Code.
  */
 function openLink(uri: string, cwd: string, e?: MouseEvent) {
   const local = isLocalTarget(uri);
-  if (local && e?.shiftKey) api.openLocation(uri, cwd, 'code');
+  if (local && (e?.ctrlKey || e?.metaKey || e?.shiftKey)) api.openLocation(uri, cwd, 'code');
   else if (opensInViewer(uri)) openMedia(api, uri, cwd);
   else if (local) api.openLocation(uri, cwd, 'finder');
   else api.openExternal(uri);
@@ -494,6 +494,9 @@ function ensureTerminal(v: PaneView): Terminal {
   term.loadAddon(new WebLinksAddon((_e, uri) => openLink(uri, cwdOf(v))));
   term.registerLinkProvider(mediaLinks(term, (e, target) => openLink(target, cwdOf(v), e)));
   term.registerLinkProvider(pathLinks(term, api, () => cwdOf(v), (e, target) => openLink(target, cwdOf(v), e)));
+  // On a Mac ⌃-click also arrives as a right-click, which xterm answers by selecting the word under
+  // it; a ⌃-click here opens a link in VS Code instead.
+  v.termHost.addEventListener('contextmenu', (e) => e.ctrlKey && e.button === 0 && e.stopPropagation(), true);
   term.open(v.termHost);
   try {
     const gl = new WebglAddon();

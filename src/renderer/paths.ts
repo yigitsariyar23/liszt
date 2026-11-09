@@ -2,15 +2,15 @@ import type { ILink, ILinkProvider, Terminal } from '@xterm/xterm';
 import type { LisztApi } from '../main/preload';
 import { logicalLine } from './viewer';
 
-// Local paths a terminal prints, made clickable: a click shows the place in Finder, a Shift-click
-// opens it in VS Code. Only a path that exists on disk becomes a link, so a slash command or a
+// Local paths a terminal prints, made clickable: a click shows the place in Finder, a Ctrl-, Cmd- or
+// Shift-click opens it in VS Code. Only a path that exists on disk becomes a link, so a slash command or a
 // fraction stays plain text, and a path may hold spaces (`~/Creative Studio v2/exports/`).
 
 /**
  * Where a path may start: absolute, from home, `./` or `../`, a file: address, or a relative one
- * like `src/a.ts`. Not inside a longer path, a web address or a word.
+ * like `src/a.ts` or `.local/a.txt`. Not inside a longer path, a web address or a word.
  */
-const START = /(?<![\w.~/:@+\\-])(?:file:\/\/|~\/|\.{1,2}\/|\/(?=[\w.~@+-])|[\w@+-][\w.@+-]*\/)/g;
+const START = /(?<![\w.~/:@+\\-])(?:file:\/\/|~\/|\.{1,2}\/|\/(?=[\w.~@+-])|\.?[\w@+-][\w.@+-]*\/)/g;
 
 /** A path ends at a quote, a bracket, a tab or a table's border; a space may still be part of it. */
 const STOP = /[\t'"\x60<>()[\]{}|│┃║]/;
