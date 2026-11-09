@@ -50,6 +50,7 @@
       "node_modules/node-pty/**"
     ],
     "npmRebuild": false,
+    "electronDist": "node_modules/electron/dist",
     "mac": {
       "target": [
         {
