@@ -1369,8 +1369,11 @@ function onDisk(p: string, cwd: string): { file: string; line?: string; col?: st
 // disk; 0 when none does. A path may hold spaces, and words after it are not part of it.
 ipcMain.handle('paths:resolve', (_e, candidates: string[], cwd: string) =>
   candidates.map((text) => {
-    const cuts = [text.length];
-    for (let i = text.length - 1; i > 0 && cuts.length < 24; i--) if (text[i] === ' ') cuts.push(i);
+    // The spaces nearest the path's start: a long paragraph after a path has many more than a name
+    // could hold, and looking only at its last ones never reaches the path's own end.
+    const spaces: number[] = [];
+    for (let i = 1; i < text.length && spaces.length < 24; i++) if (text[i] === ' ') spaces.push(i);
+    const cuts = [text.length, ...spaces.reverse()];
     for (const cut of cuts) {
       const whole = text.slice(0, cut);
       // A sentence's closing punctuation is not part of the path, unless the name really ends so.
@@ -1422,6 +1425,7 @@ function openInCode(at: { file: string; line?: string; col?: string }, roots: st
 // either opens in VS Code inside the project's folder.
 ipcMain.on('open:location', (_e, target: string, cwd: string, opener: 'finder' | 'code', project?: string) => {
   const at = onDisk(target, cwd);
+  if (process.env.LISZT_DEBUG) console.log('[open]', opener, target, cwd, project, at?.file ?? 'not on disk');
   if (!at) return;
   if (opener === 'code') openInCode(at, [project ?? '', cwd]);
   else if (fs.statSync(at.file).isDirectory()) void shell.openPath(at.file);
