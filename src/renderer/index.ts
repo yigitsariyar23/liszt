@@ -1892,8 +1892,8 @@ function projectTab(p: ProjectState): HTMLElement {
 
 // In the left panel the projects form a tree: each group is a heading that folds its projects away,
 // and the projects in no group follow as plain rows. Under each project its sessions are branches,
-// so the session tab bar is not needed while the tree is in sight: the Liszt sessions in tab order,
-// then the ones running or kept elsewhere, chosen by the same Show and Sort as the Sessions panel.
+// so the session tab bar is not needed while the tree is in sight: the Liszt sessions and the ones
+// running or kept elsewhere, chosen and ordered by the same Show and Sort as the Sessions panel.
 // Sessions whose folder belongs to no open project close the tree. A project row opens, renames
 // and has the same menu as a tab; reordering and regrouping by dragging stay with the tabs.
 
@@ -1932,13 +1932,19 @@ function treeSessions(terms: string[]): { byProject: Map<string, TreeSession[]>;
     byProject.set(p.id, list);
   }
   const elsewhere: TreeSession[] = [];
-  const outside = rows.filter((r) => !r.view).sort((a, b) => Number(b.pinned) - Number(a.pinned) || SORTS[state.sessionSort](a, b));
-  for (const r of outside) {
+  for (const r of rows.filter((r) => !r.view)) {
     const p = projectFor(r.cwd);
     if (terms.length && !matches(`${r.title} ${r.where} ${r.detail}${p ? ` ${p.name} ${p.path}` : ''}`)) continue;
     const item: TreeSession = { title: r.title, dot: r.dot, chip: r.chip[1], kind: 'claude', row: r };
     (p ? byProject.get(p.id)! : elsewhere).push(item);
   }
+  // Under a project its sessions follow Sort, open in Liszt or not, pinned ones first; shells have
+  // no session row and close the list in tab order. The projects keep their own order.
+  const sort = SORTS[state.sessionSort];
+  const bySort = (a: TreeSession, b: TreeSession) =>
+    !a.row || !b.row ? Number(!a.row) - Number(!b.row) : Number(b.row.pinned) - Number(a.row.pinned) || sort(a.row, b.row);
+  for (const list of byProject.values()) list.sort(bySort);
+  elsewhere.sort(bySort);
   return { byProject, elsewhere };
 }
 
@@ -2271,11 +2277,11 @@ async function folderMenu(dir: string, rows: SessionRow[], at: MenuAnchor) {
 /** Session rows under a project: its own first, then a few of the outside ones and a line for the rest. */
 function treeBranch(key: string, sessions: TreeSession[]): HTMLElement {
   const box = h('div', 'ptree-sessions');
-  const own = sessions.filter((s) => s.view);
+  // Every session open in Liszt shows; the others up to a limit, all in the order given.
   const outside = sessions.filter((s) => !s.view);
   const all = treeShowAll.has(key);
-  const listed = all ? outside : outside.slice(0, TREE_OUTSIDE_LIMIT);
-  box.append(...[...own, ...listed].map(treeSession));
+  const listed = new Set(all ? outside : outside.slice(0, TREE_OUTSIDE_LIMIT));
+  box.append(...sessions.filter((s) => s.view || listed.has(s)).map(treeSession));
   if (outside.length > TREE_OUTSIDE_LIMIT) {
     const more = h('div', 'ptree-more', all ? 'Show fewer' : `${outside.length - TREE_OUTSIDE_LIMIT} more…`);
     more.addEventListener('click', () => {
