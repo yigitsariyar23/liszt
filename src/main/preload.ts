@@ -114,6 +114,9 @@ const api = {
   onAppSessions: (cb: (list: AppSession[]) => void) => on('app-sessions', cb),
   onTranscriptSessions: (cb: (list: TranscriptSession[]) => void) => on('transcript-sessions', cb),
   onMoveRequest: (cb: (paneId: string, dir: string) => void) => on('move-request', cb),
+  /** A `liszt` command from a terminal or a Claude session, answered with cliReply. */
+  onCli: (cb: (id: string, cmd: string, args: string[]) => void) => on('cli', cb),
+  cliReply: (id: string, ok: boolean, text: string) => ipcRenderer.send('cli:reply', id, ok, text),
   onMenu: (cb: (command: string) => void) => on('menu', cb),
   onFocusPane: (cb: (id: string) => void) => on('focus-pane', cb),
 };

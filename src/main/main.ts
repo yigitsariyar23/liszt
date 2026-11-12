@@ -190,6 +190,13 @@ function startHookServer(): Promise<string> {
         res.end(moveRequest(paneId, params.get('move') ?? ''));
         return;
       }
+      if (params.get('token') === token && params.has('cli')) {
+        void cliRequest(params.get('cli') ?? '', params.getAll('arg')).then(({ ok, text }) => {
+          res.statusCode = ok ? 200 : 400;
+          res.end(text.endsWith('\n') ? text : `${text}\n`);
+        });
+        return;
+      }
       res.end();
       if (!paneId || params.get('token') !== token) return;
       let payload: Record<string, unknown>;
@@ -333,6 +340,99 @@ function moveRequest(paneId: string, dir: string): string {
   if (!roots.some((r) => real.startsWith(`${r}/`))) return `Not inside a projects folder (${roots.join(', ')}): ${real}`;
   send('move-request', paneId, real);
   return `Moving this session to ${real} when this turn ends.`;
+}
+
+// --- The liszt command -------------------------------------------------------------------------
+// `liszt` lets Claude, or the user in a terminal, list Liszt's sessions and close, archive or
+// delete them. The script asks the hook server, which hands the command to the renderer (it holds
+// the sessions and does what their menus do) and answers with its reply. Deleting asks the user in
+// Liszt first. A skill under ~/.claude/skills tells every Claude session the command is there.
+
+const cliScript = () => path.join(userData(), 'liszt');
+const cliSkillDir = () => path.join(os.homedir(), '.claude', 'skills', 'liszt');
+/** Longest the script waits: a delete waits for the user to answer Liszt's question. */
+const CLI_TIMEOUT = 50_000;
+
+const CLI_HELP = `liszt — Liszt's sessions, for Claude or a terminal
+
+  liszt sessions [--show active|liszt|running|unread|pinned|archived|all] [--project <name or path>]
+      Lists sessions, one per line: id, status, project, title, folder. --show defaults to active.
+  liszt close <id>...      Ends what runs each session; its conversation is kept and can be resumed.
+  liszt archive <id>...    Closes each session and files it under Archived.
+  liszt unarchive <id>...  Takes each session out of Archived.
+  liszt delete <id>...     Asks the user in Liszt, then deletes the sessions (undo is offered there).
+
+An id is a session id, a unique start of one (at least 6 characters) or a background session's id.
+A session still working closes when its turn ends, so a session can close or archive itself.`;
+
+const cliWaits = new Map<string, (reply: { ok: boolean; text: string }) => void>();
+
+function cliRequest(cmd: string, args: string[]): Promise<{ ok: boolean; text: string }> {
+  if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') return Promise.resolve({ ok: true, text: CLI_HELP });
+  if (!win || win.isDestroyed()) return Promise.resolve({ ok: false, text: 'Liszt has no window open.' });
+  // The question a delete asks is answered in Liszt, so Liszt comes forward.
+  if (cmd === 'delete') win.show();
+  const id = randomUUID();
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      cliWaits.delete(id);
+      resolve({ ok: false, text: cmd === 'delete' ? 'No answer yet: Liszt is still asking the user to confirm the delete.' : 'Liszt did not answer in time.' });
+    }, CLI_TIMEOUT);
+    cliWaits.set(id, (reply) => {
+      clearTimeout(timer);
+      cliWaits.delete(id);
+      resolve(reply);
+    });
+    send('cli', id, cmd, args);
+  });
+}
+
+ipcMain.on('cli:reply', (_e, id: string, ok: boolean, text: string) => cliWaits.get(id)?.({ ok, text }));
+
+function writeCli() {
+  const script = `#!/bin/sh
+# Lists, closes, archives and deletes Liszt's sessions; \`liszt help\` says how.
+url=$(cat ${shellQuote(hookUrlFile())} 2>/dev/null) || { echo "Liszt is not running." >&2; exit 1; }
+cmd=\${1:-help}
+[ $# -gt 0 ] && shift
+for a do shift; set -- "$@" --data-urlencode "arg=$a"; done
+out=$(mktemp) || exit 1
+code=$(curl -s -m ${CLI_TIMEOUT / 1000 + 10} --noproxy '*' -G -o "$out" -w '%{http_code}' --data-urlencode "cli=$cmd" "$@" "$url") || { rm -f "$out"; echo "Liszt did not answer." >&2; exit 1; }
+if [ "$code" = 200 ]; then cat "$out"; rm -f "$out"; exit 0; fi
+cat "$out" >&2; rm -f "$out"; exit 1
+`;
+  fs.writeFileSync(cliScript(), script, { mode: 0o755 });
+  fs.chmodSync(cliScript(), 0o755);
+  const skill = `---
+name: liszt
+description: List, close, archive or delete Claude Code sessions in Liszt, the user's terminal app for Claude sessions. Use when the user asks to close, stop, archive, clean up or delete sessions (in Liszt, open, running, old or of a project), or asks which sessions are open or running.
+---
+
+Liszt's sessions are reached with its command, which talks to the running Liszt app:
+
+    ${shellQuote(cliScript())} help
+
+Start with \`sessions\` to find the ids, then act on them:
+
+    ${shellQuote(cliScript())} sessions [--show active|liszt|running|unread|pinned|archived|all] [--project <name>]
+    ${shellQuote(cliScript())} close <id>...
+    ${shellQuote(cliScript())} archive <id>...
+    ${shellQuote(cliScript())} unarchive <id>...
+    ${shellQuote(cliScript())} delete <id>...
+
+- Pass several ids to one call rather than one call per session.
+- \`delete\` shows the user a question in Liszt and waits for the answer; say so before running it.
+- A session that is still working closes when its turn ends, this one included; end your turn after closing or archiving yourself.
+`;
+  // A test instance with its own data folder would point every Claude session at its own command.
+  if (process.env.LISZT_USER_DATA) return;
+  try {
+    fs.mkdirSync(cliSkillDir(), { recursive: true });
+    const file = path.join(cliSkillDir(), 'SKILL.md');
+    if (!fs.existsSync(file) || fs.readFileSync(file, 'utf8') !== skill) fs.writeFileSync(file, skill);
+  } catch (err) {
+    console.error('liszt skill not written:', errorText(err));
+  }
 }
 
 ipcMain.handle('projects:incubator', () => {
@@ -509,8 +609,13 @@ const newProjectArgs = (o: SpawnOptions, resume: boolean) =>
 /** A resumed session keeps the name it has. */
 const nameArgs = (o: SpawnOptions, resume: boolean) => (o.name && !resume ? ['--name', o.name] : []);
 
-/** Auto mode's permission check reads moving a session's transcript as tampering, so the move script is allowed outright. */
-const paneSettings = (o: SpawnOptions) => hookSettings(o.paneId, o.newProject ? [`Bash(${moveCommand(o.paneId)} *)`] : []);
+/**
+ * Auto mode's permission check reads moving a session's transcript as tampering, so the move script
+ * is allowed outright. Listing sessions needs no permission; closing and deleting them are asked
+ * about as any command is.
+ */
+const paneSettings = (o: SpawnOptions) =>
+  hookSettings(o.paneId, [`Bash(${shellQuote(cliScript())} sessions*)`, `Bash(${shellQuote(cliScript())} help)`, ...(o.newProject ? [`Bash(${moveCommand(o.paneId)} *)`] : [])]);
 
 /** Starts a background session for a pane; null when Claude Code would not. */
 async function startBackground(o: SpawnOptions, resume: boolean, sessionId: string, cwd: string): Promise<{ bgId: string; sessionId: string } | null> {
@@ -2016,6 +2121,7 @@ app.whenReady().then(() => {
   fs.mkdirSync(userData(), { recursive: true });
   writeClaudeSettings();
   writeMoveScript();
+  writeCli();
   loadNotifyPrefs();
   loadSettings();
   watchProjectFolders();

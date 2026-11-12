@@ -111,6 +111,8 @@ interface PaneView {
   renaming?: number;
   /** Folder Claude asked to move this New Project session to; it moves when the turn ends. */
   moveTo?: string;
+  /** Asked by the liszt command to close or archive while working; done when the turn ends. */
+  afterTurn?: 'close' | 'archive';
   /** A command the shell runs once it is up, typed in as if by hand. */
   run?: string;
   runTimer?: number;
@@ -2880,6 +2882,110 @@ function onMoveRequest(paneId: string, dir: string) {
   if (!isWorking(v)) void moveSession(v);
 }
 
+// --- The liszt command -------------------------------------------------------------------------
+// Main hands over what `liszt` was asked; the sessions are found as the Sessions panel lists them
+// and closed, archived or deleted as their menus do. A Liszt session still working is closed when
+// its turn ends, so the one asking can close itself; deleting asks the user, as the menu does.
+
+const CLI_SHOWS = FILTER_OPTIONS.map(([k]) => k);
+
+/** The sessions the ids name: a session id, a unique start of one (6 characters or more) or a background id. */
+function cliRows(ids: string[]): { rows: SessionRow[]; errors: string[] } {
+  const all = sessionRows();
+  const rows: SessionRow[] = [];
+  const errors: string[] = [];
+  for (const id of ids) {
+    const exact = all.find((r) => r.sessionId === id || r.bgId === id);
+    const found = exact ? [exact] : id.length >= 6 ? all.filter((r) => r.sessionId.startsWith(id)) : [];
+    if (found.length === 1) {
+      if (!rows.includes(found[0])) rows.push(found[0]);
+    } else errors.push(found.length ? `${id}: matches ${found.length} sessions; give more of the id` : `${id}: no such session`);
+  }
+  return { rows, errors };
+}
+
+function cliStatus(r: SessionRow): string {
+  if (r.view) return isWorking(r.view) ? 'working' : r.view.status;
+  if (r.live) return r.dot === 'running' ? 'working elsewhere' : 'running elsewhere';
+  return r.archived ? 'archived' : 'not running';
+}
+
+function cliList(args: string[]): string {
+  let show: SessionFilter = 'active';
+  let project = '';
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--show' && CLI_SHOWS.includes(args[i + 1] as SessionFilter)) show = args[++i] as SessionFilter;
+    else if (args[i] === '--project' && args[i + 1]) project = fold(args[++i]);
+    else throw new Error(`Unknown option: ${args[i]}\nliszt sessions [--show ${CLI_SHOWS.join('|')}] [--project <name or path>]`);
+  }
+  const rows = sessionRows()
+    .filter(FILTERS[show])
+    .filter((r) => !project || fold(`${r.project} ${r.cwd}`).includes(project))
+    .sort((a, b) => SORTS.status(a, b));
+  if (!rows.length) return `No sessions (--show ${show}${project ? `, --project ${project}` : ''}).`;
+  return rows
+    .map((r) => [r.sessionId, cliStatus(r), r.project, r.title.replace(/\s+/g, ' '), r.cwd].join('\t'))
+    .join('\n');
+}
+
+/** Closes or archives one session for the command; what happened, in a line. */
+async function cliClose(r: SessionRow, archive: boolean): Promise<string> {
+  const verb = archive ? 'Archived' : 'Closed';
+  if (r.view) {
+    if (isWorking(r.view)) {
+      r.view.afterTurn = archive ? 'archive' : 'close';
+      return `${r.sessionId}: still working; ${archive ? 'archived' : 'closed'} when its turn ends`;
+    }
+    if (archive) await archiveSession(r, true, false);
+    else await closePane(r.view, { ask: false });
+    return `${r.sessionId}: ${verb.toLowerCase()}`;
+  }
+  // Liszt cannot tell when a session elsewhere ends its turn, so a working one is left alone.
+  if (r.live && r.dot === 'running') throw new Error(`${r.sessionId}: working outside Liszt; not ${verb.toLowerCase()}`);
+  if (archive) await archiveSession(r, true, false);
+  else if (!r.live) return `${r.sessionId}: not running`;
+  else if (!(await closeSession(r, false))) throw new Error(`${r.sessionId}: could not be closed`);
+  return `${r.sessionId}: ${verb.toLowerCase()}`;
+}
+
+/** Does what the liszt command asked once a session's turn is over. */
+async function finishAfterTurn(v: PaneView) {
+  const archive = v.afterTurn === 'archive';
+  v.afterTurn = undefined;
+  const row = sessionRows().find((r) => r.view === v);
+  if (archive && row) await archiveSession(row, true, false);
+  else await closePane(v, { ask: false });
+}
+
+async function onCli(id: string, cmd: string, args: string[]) {
+  const reply = (ok: boolean, text: string) => api.cliReply(id, ok, text);
+  try {
+    if (cmd === 'sessions' || cmd === 'list') return reply(true, cliList(args));
+    if (!['close', 'archive', 'unarchive', 'delete'].includes(cmd)) return reply(false, `Unknown command: ${cmd}. Run liszt help.`);
+    if (!args.length) return reply(false, `liszt ${cmd} <id>...: no session ids given.`);
+    const { rows, errors } = cliRows(args);
+    const lines = [...errors];
+    if (cmd === 'delete') {
+      if (rows.length) lines.push(...((await deleteSessions(rows)) ? rows.map((r) => `${r.sessionId}: deleted (Undo is offered in Liszt for a few seconds)`) : ['The user chose not to delete them.']));
+    } else {
+      for (const r of rows) {
+        try {
+          if (cmd === 'unarchive') {
+            await archiveSession(r, false);
+            lines.push(`${r.sessionId}: unarchived`);
+          } else lines.push(await cliClose(r, cmd === 'archive'));
+        } catch (err) {
+          errors.push((err as Error).message);
+          lines.push((err as Error).message);
+        }
+      }
+    }
+    reply(errors.length === 0 && rows.length > 0, lines.join('\n'));
+  } catch (err) {
+    reply(false, (err as Error).message);
+  }
+}
+
 /**
  * Reopens a session in the project of the folder Claude moved it to, opening that folder as a
  * project if needed. The session is stopped and its transcript filed under the new folder, so it
@@ -3909,7 +4015,7 @@ const undoMarks = new Map<string, SessionMark | undefined>();
  * Deletes the sessions after one question, all at once. They are closed and leave the panel at
  * once, and a notice offers to undo that; Claude Code deletes them only when it is gone.
  */
-async function deleteSessions(rows: SessionRow[]) {
+async function deleteSessions(rows: SessionRow[]): Promise<boolean> {
   const one = rows.length === 1 ? rows[0] : undefined;
   const bg = rows.filter((r) => r.bgId);
   const running = rows.filter((r) => r.view || r.live).length;
@@ -3926,11 +4032,17 @@ async function deleteSessions(rows: SessionRow[]) {
       }Their conversations are moved to the Trash and can no longer be resumed. Undo is offered for a few seconds.${running ? `\n\n${running} running are closed first.` : ''}${
         inApp ? `\n\nThe Claude app keeps listing ${inApp} of them until you delete them there.` : ''
       }`;
-  if (!(await askDialog(question, { ok: 'Delete', danger: true }))) return renderSessions();
+  if (!(await askDialog(question, { ok: 'Delete', danger: true }))) {
+    renderSessions();
+    return false;
+  }
   // Closed now, so nothing runs them while Undo is offered; the conversations are kept until then.
   const closed = await Promise.all(rows.map((r) => (r.view ? closePane(r.view, { ask: false }) : closeSession(r, false))));
   const gone = rows.filter((r, i) => closed[i] && !undoMarks.has(r.sessionId));
-  if (!gone.length) return renderSessions();
+  if (!gone.length) {
+    renderSessions();
+    return true;
+  }
   for (const r of gone) {
     undoMarks.set(r.sessionId, state.sessionMarks[r.sessionId]);
     // What it had is kept, so a delete that fails on the next start can give it back.
@@ -3952,6 +4064,7 @@ async function deleteSessions(rows: SessionRow[]) {
     },
     expire: () => void finishDelete(gone),
   });
+  return true;
 }
 
 /** Puts the sessions' rows back as they were. */
@@ -4346,6 +4459,7 @@ function onHook(ev: HookEvent) {
         notify(v, v.activity, 'done');
       }
       if (v.moveTo && !isWorking(v)) void moveSession(v);
+      if (v.afterTurn && !isWorking(v)) void finishAfterTurn(v);
       break;
   }
 
@@ -4694,6 +4808,7 @@ api.onAgents(onAgents);
 api.onAppSessions(onAppSessions);
 api.onTranscriptSessions(onTranscriptSessions);
 api.onMoveRequest(onMoveRequest);
+api.onCli((id, cmd, args) => void onCli(id, cmd, args));
 api.onMenu(onMenu);
 api.onFocusPane((id) => {
   const v = views.get(id);
