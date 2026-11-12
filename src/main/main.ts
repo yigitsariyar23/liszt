@@ -356,11 +356,16 @@ const CLI_TIMEOUT = 50_000;
 const CLI_HELP = `liszt — Liszt's sessions, for Claude or a terminal
 
   liszt sessions [--show active|liszt|running|unread|pinned|archived|all] [--project <name or path>]
-      Lists sessions, one per line: id, status, project, title, folder. --show defaults to active.
+      Lists sessions, one per line: id, status, project, title, folder, group. --show defaults to active.
   liszt close <id>...      Ends what runs each session; its conversation is kept and can be resumed.
   liszt archive <id>...    Closes each session and files it under Archived.
   liszt unarchive <id>...  Takes each session out of Archived.
   liszt delete <id>...     Asks the user in Liszt, then deletes the sessions (undo is offered there).
+  liszt groups [--project <name or path>]
+      Lists the session groups of the project tree: project, group, size, folded or not, colour.
+  liszt group <name> <id>... [--color <colour>]
+      Files the sessions in that group of their project, made if there is none of that name.
+  liszt ungroup <id>...    Takes the sessions out of their group; an emptied group goes.
 
 An id is a session id, a unique start of one (at least 6 characters) or a background session's id.
 A session still working closes when its turn ends, so a session can close or archive itself.`;
@@ -405,7 +410,7 @@ cat "$out" >&2; rm -f "$out"; exit 1
   fs.chmodSync(cliScript(), 0o755);
   const skill = `---
 name: liszt
-description: List, close, archive or delete Claude Code sessions in Liszt, the user's terminal app for Claude sessions. Use when the user asks to close, stop, archive, clean up or delete sessions (in Liszt, open, running, old or of a project), or asks which sessions are open or running.
+description: List, close, archive, delete or group Claude Code sessions in Liszt, the user's terminal app for Claude sessions. Use when the user asks to close, stop, archive, clean up, delete, group or organize sessions (in Liszt, open, running, old or of a project), or asks which sessions are open or running.
 ---
 
 Liszt's sessions are reached with its command, which talks to the running Liszt app:
@@ -419,8 +424,12 @@ Start with \`sessions\` to find the ids, then act on them:
     ${shellQuote(cliScript())} archive <id>...
     ${shellQuote(cliScript())} unarchive <id>...
     ${shellQuote(cliScript())} delete <id>...
+    ${shellQuote(cliScript())} groups [--project <name>]
+    ${shellQuote(cliScript())} group <name> <id>... [--color grey|blue|green|yellow|orange|red|pink|purple|cyan]
+    ${shellQuote(cliScript())} ungroup <id>...
 
 - Pass several ids to one call rather than one call per session.
+- Groups belong to one project and show only in Liszt's project tree; \`group\` takes sessions of a single project, and a session is in one group at most.
 - \`delete\` shows the user a question in Liszt and waits for the answer; say so before running it.
 - A session that is still working closes when its turn ends, this one included; end your turn after closing or archiving yourself.
 `;
@@ -615,7 +624,7 @@ const nameArgs = (o: SpawnOptions, resume: boolean) => (o.name && !resume ? ['--
  * about as any command is.
  */
 const paneSettings = (o: SpawnOptions) =>
-  hookSettings(o.paneId, [`Bash(${shellQuote(cliScript())} sessions*)`, `Bash(${shellQuote(cliScript())} help)`, ...(o.newProject ? [`Bash(${moveCommand(o.paneId)} *)`] : [])]);
+  hookSettings(o.paneId, [`Bash(${shellQuote(cliScript())} sessions*)`, `Bash(${shellQuote(cliScript())} groups*)`, `Bash(${shellQuote(cliScript())} help)`, ...(o.newProject ? [`Bash(${moveCommand(o.paneId)} *)`] : [])]);
 
 /** Starts a background session for a pane; null when Claude Code would not. */
 async function startBackground(o: SpawnOptions, resume: boolean, sessionId: string, cwd: string): Promise<{ bgId: string; sessionId: string } | null> {

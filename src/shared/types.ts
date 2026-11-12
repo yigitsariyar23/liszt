@@ -94,6 +94,17 @@ export interface ProjectGroup {
   collapsed?: boolean;
 }
 
+/** A named group of a project's Claude sessions in the project tree, folded away when collapsed. */
+export interface SessionGroupState {
+  id: string;
+  /** May be empty; the heading then shows only its colour. */
+  name: string;
+  color: GroupColor;
+  collapsed?: boolean;
+  /** Claude session ids, open in Liszt or not; a session is in one group at most. */
+  sessions: string[];
+}
+
 /** How a project's visible sessions are tiled: a tree of splits with session panes as leaves. */
 export type LayoutNode =
   | { type: 'pane'; paneId: string }
@@ -117,6 +128,8 @@ export interface ProjectState {
   treeOpen?: boolean;
   /** Its group's projects always sit next to each other in `AppState.projects`. */
   groupId?: string;
+  /** Groups its Claude sessions are filed in, under it in the project tree, in this order. */
+  sessionGroups?: SessionGroupState[];
   tasks: TaskState[];
   autopilot: AutopilotState;
 }

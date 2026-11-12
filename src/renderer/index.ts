@@ -24,6 +24,7 @@ import type {
   PaneKind,
   PaneState,
   ProjectGroup,
+  SessionGroupState,
   ProjectState,
   RepoOf,
   SessionFilter,
@@ -1223,7 +1224,7 @@ async function renameInTerminal(v: PaneView, term: Terminal) {
   }
 }
 
-async function sessionMenu(v: PaneView, from: 'tab' | 'head', at: MenuAnchor) {
+async function sessionMenu(v: PaneView, from: 'tab' | 'head', at: MenuAnchor, groups?: GroupMenu) {
   const project = v.project;
   const visible = panesIn(project.layout);
   const anchor = splitAnchor(project);
@@ -1245,12 +1246,14 @@ async function sessionMenu(v: PaneView, from: 'tab' | 'head', at: MenuAnchor) {
     entries.push({ label: v.switchPending ? `Stay in the ${v.pane.terminal ? 'Terminal' : 'Chat'}` : isWorking(v) ? `${label} When Done` : label, id: 'toggle-view', key: 'e' });
   }
   if (v.pane.kind === 'claude') entries.push({ label: 'Copy Session ID', id: 'copy-id', key: 'i', enabled: v.pane.started });
+  if (groups) entries.push('separator', ...groups.entries);
   entries.push('separator', { label: 'Close Session', id: 'close', key: 'c' }, { label: 'Close Other Sessions', id: 'close-others', key: 'o', enabled: project.panes.length > 1 });
   // A shell has no conversation to delete; a Claude session that never started has nothing kept yet.
   if (v.pane.kind === 'claude') entries.push('separator', { label: 'Delete Session…', id: 'delete', key: 'd', danger: true, enabled: v.pane.started });
   const choice = await showMenu(entries, at);
   // The session may have been closed while the menu was open.
   if (views.get(v.pane.id) !== v) return;
+  if (choice?.startsWith('sgroup:')) return groups?.pick(choice);
   switch (choice) {
     case 'rename':
       return from === 'tab' ? renameTab(v) : editTitle(v);
@@ -1832,6 +1835,7 @@ function renderTabs() {
   tabsDirty = false;
   projectTabEls.clear();
   groupTabEls.clear();
+  sessionGroupEls.clear();
   if (inSidebar()) {
     tabsEl.replaceChildren();
     renderProjectTree();
@@ -2163,7 +2167,7 @@ function treeProject(p: ProjectState, sessions: TreeSession[], searching: boolea
     void projectMenu(p, pointer(e));
   });
   projectTabEls.set(p.id, row);
-  return open && sessions.length ? [row, treeBranch(p.id, sessions)] : [row];
+  return open && sessions.length ? [row, treeProjectBranch(p, sessions, searching)] : [row];
 }
 
 /** Folders under "Other folders" whose sessions are listed; the rest stay folded. */
@@ -2277,13 +2281,164 @@ async function folderMenu(dir: string, rows: SessionRow[], at: MenuAnchor) {
 }
 
 /** Session rows under a project: its own first, then a few of the outside ones and a line for the rest. */
+// --- Session groups ----------------------------------------------------------------------------
+// In the project tree a project's Claude sessions can be filed in groups the user names, each a
+// heading that folds its sessions away. Groups come first in the order they were made, the
+// sessions in none after them; inside each the sessions keep the order Sort gives. A group whose
+// sessions the Show choice leaves out is not drawn; one left with no sessions at all is removed.
+
+/** Headings drawn in the tree, so a new group can be named in place. */
+const sessionGroupEls = new Map<string, HTMLElement>();
+
+const sessionGroupOf = (project: ProjectState, sessionId: string) => project.sessionGroups?.find((g) => g.sessions.includes(sessionId));
+
+function treeProjectBranch(p: ProjectState, sessions: TreeSession[], searching: boolean): HTMLElement {
+  const box = h('div', 'ptree-sessions');
+  const grouped = new Set<TreeSession>();
+  for (const group of p.sessionGroups ?? []) {
+    const members = sessions.filter((s) => s.row && group.sessions.includes(s.row.sessionId));
+    if (!members.length) continue;
+    for (const s of members) grouped.add(s);
+    box.append(treeSessionGroup(p, group, members, searching));
+  }
+  box.append(...branchItems(p.id, sessions.filter((s) => !grouped.has(s))));
+  return box;
+}
+
+function treeSessionGroup(p: ProjectState, group: SessionGroupState, members: TreeSession[], searching: boolean): HTMLElement {
+  const collapsed = Boolean(group.collapsed) && !searching;
+  const box = h('div', `ptree-sgroup${collapsed ? ' collapsed' : ''}`);
+  box.style.setProperty('--group', (GROUP_COLORS.find(([c]) => c === group.color) ?? GROUP_COLORS[0])[2]);
+  const head = h('div', 'ptree-sgroup-head');
+  // The arrow tells a folded group apart from the sessions in no group that follow it.
+  head.append(iconEl(collapsed ? ICONS.chevronRight : ICONS.chevronDown, 'ptree-sgroup-caret'), h('span', 'ptree-swatch'), h('span', 'tgroup-name', group.name), h('span', 'ptree-count', String(members.length)));
+  const status = members.some((s) => s.dot === 'running') ? 'running' : members.some((s) => s.dot === 'unread') ? 'unread' : '';
+  if (collapsed && status) head.append(h('span', `dot ${status}`));
+  head.title = `${group.name || 'Unnamed group'} · ${members.length} ${members.length === 1 ? 'session' : 'sessions'}\nClick to ${collapsed ? 'expand' : 'collapse'}, right-click for more`;
+  head.addEventListener('click', () => {
+    if (searching || head.querySelector('[contenteditable="true"]')) return;
+    group.collapsed = !group.collapsed || undefined;
+    renderTabs();
+    save();
+  });
+  head.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    void sessionGroupMenu(p, group, pointer(e));
+  });
+  sessionGroupEls.set(group.id, head);
+  box.append(head);
+  if (!collapsed) {
+    const inner = h('div', 'ptree-sgroup-sessions');
+    inner.append(...branchItems(`${p.id}:${group.id}`, members));
+    box.append(inner);
+  }
+  return box;
+}
+
+async function sessionGroupMenu(p: ProjectState, group: SessionGroupState, at: MenuAnchor) {
+  const choice = await showMenu(
+    [
+      { label: 'Rename…', id: 'rename', key: 'r' },
+      {
+        label: 'Color',
+        key: 'k',
+        submenu: GROUP_COLORS.map(([color, label, css]) => ({ label, id: `color:${color}`, swatch: css, checked: color === group.color })),
+      },
+      { label: group.collapsed ? 'Expand' : 'Collapse', id: 'collapse', key: 'e' },
+      'separator',
+      { label: 'Ungroup', id: 'ungroup', key: 'u' },
+    ],
+    at,
+  );
+  if (!choice || !p.sessionGroups?.includes(group)) return;
+  if (choice.startsWith('color:')) group.color = choice.slice('color:'.length) as GroupColor;
+  else if (choice === 'collapse') group.collapsed = !group.collapsed || undefined;
+  else if (choice === 'ungroup') p.sessionGroups = p.sessionGroups.filter((g) => g !== group);
+  else if (choice === 'rename') return renameSessionGroup(group);
+  renderTabs();
+  save();
+}
+
+function renameSessionGroup(group: SessionGroupState) {
+  const name = sessionGroupEls.get(group.id)?.querySelector<HTMLElement>('.tgroup-name');
+  if (!name) return;
+  editText(name, group.name, (text) => {
+    if (text !== null) group.name = text;
+    renderTabs();
+    save();
+  });
+}
+
+/** Files the sessions in a group of the project, a new one when `to` is 'new', or in none. */
+function fileSessions(p: ProjectState, ids: string[], to: string, name?: string): SessionGroupState | undefined {
+  let groups = (p.sessionGroups ?? []).map((g) => ({ ...g, sessions: g.sessions.filter((id) => !ids.includes(id)) }));
+  let named: SessionGroupState | undefined;
+  if (to === 'new') {
+    const used = new Set(groups.map((g) => g.color));
+    const [color] = GROUP_COLORS.find(([c]) => !used.has(c)) ?? GROUP_COLORS[groups.length % GROUP_COLORS.length];
+    named = { id: uuid(), name: name ?? '', color, sessions: ids };
+    groups.push(named);
+  } else if (to !== 'none') {
+    const group = groups.find((g) => g.id === to);
+    if (group) group.sessions.push(...ids);
+  }
+  groups = groups.filter((g) => g.sessions.length);
+  p.sessionGroups = groups.length ? groups : undefined;
+  renderTabs();
+  save();
+  // Made from the menu, the group is named in place; the liszt command gives its name.
+  if (named && name === undefined) renameSessionGroup(named);
+  return named;
+}
+
+/** Leaves deleted sessions out of every group, removing a group they emptied. */
+function unfileSession(sessionId: string) {
+  for (const p of state.projects) {
+    if (!p.sessionGroups) continue;
+    const groups = p.sessionGroups.map((g) => ({ ...g, sessions: g.sessions.filter((id) => id !== sessionId) })).filter((g) => g.sessions.length);
+    p.sessionGroups = groups.length ? groups : undefined;
+  }
+}
+
+/** The tree's "Move to Group" entries for sessions of one project, and what picking one does. */
+interface GroupMenu {
+  entries: MenuEntry[];
+  pick: (choice: string) => void;
+}
+
+function groupMenuFor(rows: SessionRow[]): GroupMenu | undefined {
+  const projects = new Set(rows.map((r) => r.view?.project ?? projectFor(r.cwd)));
+  const p = projects.size === 1 ? [...projects][0] : undefined;
+  if (!p || !rows.length) return undefined;
+  const ids = rows.map((r) => r.sessionId);
+  const current = new Set(ids.map((id) => sessionGroupOf(p, id)));
+  const only = current.size === 1 ? [...current][0] : undefined;
+  const submenu: MenuEntry[] = [
+    ...(p.sessionGroups ?? []).map((g) => ({ label: g.name || 'Unnamed group', id: `sgroup:${g.id}`, swatch: (GROUP_COLORS.find(([c]) => c === g.color) ?? GROUP_COLORS[0])[2], checked: g === only })),
+    ...(p.sessionGroups?.length ? (['separator'] as MenuEntry[]) : []),
+    { label: 'New Group…', id: 'sgroup:new', key: 'n' },
+    ...([...current].some(Boolean) ? [{ label: 'Remove from Group', id: 'sgroup:none', key: 'r' }] : []),
+  ];
+  return {
+    entries: [{ label: 'Move to Group', key: 'g', submenu }],
+    pick: (choice) => fileSessions(p, ids, choice.slice('sgroup:'.length)),
+  };
+}
+
 function treeBranch(key: string, sessions: TreeSession[]): HTMLElement {
   const box = h('div', 'ptree-sessions');
+  box.append(...branchItems(key, sessions));
+  return box;
+}
+
+/** A branch's sessions, all open in Liszt and the others up to a limit, then the "more" line. */
+function branchItems(key: string, sessions: TreeSession[]): HTMLElement[] {
+  const items: HTMLElement[] = [];
   // Every session open in Liszt shows; the others up to a limit, all in the order given.
   const outside = sessions.filter((s) => !s.view);
   const all = treeShowAll.has(key);
   const listed = new Set(all ? outside : outside.slice(0, TREE_OUTSIDE_LIMIT));
-  box.append(...sessions.filter((s) => s.view || listed.has(s)).map(treeSession));
+  items.push(...sessions.filter((s) => s.view || listed.has(s)).map(treeSession));
   if (outside.length > TREE_OUTSIDE_LIMIT) {
     const more = h('div', 'ptree-more', all ? 'Show fewer' : `${outside.length - TREE_OUTSIDE_LIMIT} more…`);
     more.addEventListener('click', () => {
@@ -2291,9 +2446,9 @@ function treeBranch(key: string, sessions: TreeSession[]): HTMLElement {
       else treeShowAll.add(key);
       renderTabs();
     });
-    box.append(more);
+    items.push(more);
   }
-  return box;
+  return items;
 }
 
 function treeSession(s: TreeSession): HTMLElement {
@@ -2335,13 +2490,15 @@ function treeSession(s: TreeSession): HTMLElement {
     hideTreeCard();
     // On a Mac ⌃-click arrives as a right-click; here it picks the session, as ⌘-click does.
     if (e.ctrlKey && e.button === 0) return toggleSelected(key);
+    // Only the tree files sessions in groups, and only a project's own sessions.
     if (selectedSessions.has(key) && selectedSessions.size > 1) {
       const { rows, shells } = selectedInTree();
-      return void sessionRowsMenu(rows, pointer(e), shells);
+      return void sessionRowsMenu(rows, pointer(e), shells, groupMenuFor(rows));
     }
     clearSelection();
-    if (v) void sessionMenu(v, 'head', pointer(e));
-    else if (s.row) void sessionRowMenu(s.row, pointer(e));
+    const groups = s.row ? groupMenuFor([s.row]) : undefined;
+    if (v) void sessionMenu(v, 'head', pointer(e), groups);
+    else if (s.row) void sessionRowMenu(s.row, pointer(e), groups);
   });
   return el;
 }
@@ -2924,8 +3081,62 @@ function cliList(args: string[]): string {
     .sort((a, b) => SORTS.status(a, b));
   if (!rows.length) return `No sessions (--show ${show}${project ? `, --project ${project}` : ''}).`;
   return rows
-    .map((r) => [r.sessionId, cliStatus(r), r.project, r.title.replace(/\s+/g, ' '), r.cwd].join('\t'))
+    .map((r) => {
+      const p = r.view?.project ?? projectFor(r.cwd);
+      const group = p && sessionGroupOf(p, r.sessionId);
+      return [r.sessionId, cliStatus(r), r.project, r.title.replace(/\s+/g, ' '), r.cwd, group ? group.name || 'Unnamed group' : ''].join('\t');
+    })
     .join('\n');
+}
+
+/** Each project's session groups: project, group, how many sessions, folded or not. */
+function cliGroups(args: string[]): string {
+  let project = '';
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--project' && args[i + 1]) project = fold(args[++i]);
+    else throw new Error(`Unknown option: ${args[i]}\nliszt groups [--project <name or path>]`);
+  }
+  const lines = state.projects
+    .filter((p) => !project || fold(`${p.name} ${p.path}`).includes(project))
+    .flatMap((p) => (p.sessionGroups ?? []).map((g) => [p.name, g.name || 'Unnamed group', `${g.sessions.length} sessions`, g.collapsed ? 'collapsed' : 'expanded', g.color].join('\t')));
+  return lines.length ? lines.join('\n') : 'No session groups.';
+}
+
+/**
+ * `group <name> <id>...` files the sessions in the group of that name in their project, made if it
+ * is not there; `ungroup <id>...` takes them out of theirs. The sessions must share one project.
+ */
+function cliGroup(cmd: string, args: string[]): [boolean, string] {
+  let color: GroupColor | undefined;
+  const rest: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--color') {
+      const c = args[++i];
+      if (!GROUP_COLORS.some(([k]) => k === c)) return [false, `--color is one of ${GROUP_COLORS.map(([k]) => k).join(', ')}`];
+      color = c as GroupColor;
+    } else rest.push(args[i]);
+  }
+  const name = cmd === 'group' ? rest.shift()?.trim() : undefined;
+  if (cmd === 'group' && !name) return [false, 'liszt group <name> <id>... [--color <color>]'];
+  if (!rest.length) return [false, `liszt ${cmd}: no session ids given.`];
+  const { rows, errors } = cliRows(rest);
+  if (errors.length) return [false, errors.join('\n')];
+  const projects = [...new Set(rows.map((r) => r.view?.project ?? projectFor(r.cwd)))];
+  if (projects.length !== 1 || !projects[0]) return [false, projects.includes(undefined) ? 'A session that belongs to no open project cannot be grouped.' : `The sessions are in ${projects.length} projects; groups are per project.`];
+  const p = projects[0];
+  const ids = rows.map((r) => r.sessionId);
+  if (cmd === 'ungroup') {
+    fileSessions(p, ids, 'none');
+    return [true, `${ids.length} ${ids.length === 1 ? 'session' : 'sessions'} out of their group in ${p.name}`];
+  }
+  const existing = p.sessionGroups?.find((g) => fold(g.name) === fold(name!));
+  const group = existing ? (fileSessions(p, ids, existing.id), p.sessionGroups!.find((g) => g.id === existing.id)!) : fileSessions(p, ids, 'new', name)!;
+  if (color) {
+    group.color = color;
+    renderTabs();
+    save();
+  }
+  return [true, `${ids.length} ${ids.length === 1 ? 'session' : 'sessions'} in ${existing ? '' : 'new '}group "${group.name}" of ${p.name} (${group.sessions.length} in all)`];
 }
 
 /** Closes or archives one session for the command; what happened, in a line. */
@@ -2961,6 +3172,11 @@ async function onCli(id: string, cmd: string, args: string[]) {
   const reply = (ok: boolean, text: string) => api.cliReply(id, ok, text);
   try {
     if (cmd === 'sessions' || cmd === 'list') return reply(true, cliList(args));
+    if (cmd === 'groups') return reply(true, cliGroups(args));
+    if (cmd === 'group' || cmd === 'ungroup') {
+      const [ok, text] = cliGroup(cmd, args);
+      return reply(ok, text);
+    }
     if (!['close', 'archive', 'unarchive', 'delete'].includes(cmd)) return reply(false, `Unknown command: ${cmd}. Run liszt help.`);
     if (!args.length) return reply(false, `liszt ${cmd} <id>...: no session ids given.`);
     const { rows, errors } = cliRows(args);
@@ -3855,7 +4071,7 @@ function clearSelection() {
 }
 
 /** Shells, picked in the project tree, can only be closed; the rest applies to the Claude sessions. */
-async function sessionRowsMenu(rows: SessionRow[], at: MenuAnchor, shells: PaneView[] = []) {
+async function sessionRowsMenu(rows: SessionRow[], at: MenuAnchor, shells: PaneView[] = [], groups?: GroupMenu) {
   const list = rows.filter((r) => !pendingSessions.has(r.sessionId));
   if (!list.length && !shells.length) return;
   const n = list.length;
@@ -3866,6 +4082,7 @@ async function sessionRowsMenu(rows: SessionRow[], at: MenuAnchor, shells: PaneV
   const claude: MenuEntry[] = n
     ? [
         { label: unread ? `Mark ${n} as Unread` : `Mark ${n} as Read`, id: 'unread', key: 'u' },
+        ...(groups ? (['separator', ...groups.entries] as MenuEntry[]) : []),
         'separator',
         { label: closable ? `Close ${count(closable)}` : 'Close Sessions', id: 'close', key: 'c', enabled: closable > 0 },
         archived ? { label: `Archive ${count(n)}`, id: 'archive', key: 'a' } : { label: `Unarchive ${count(n)}`, id: 'unarchive', key: 'a' },
@@ -3875,6 +4092,11 @@ async function sessionRowsMenu(rows: SessionRow[], at: MenuAnchor, shells: PaneV
     : [{ label: `Close ${count(closable)}`, id: 'close', key: 'c' }];
   const choice = await showMenu(claude, at);
   if (!choice) return;
+  if (choice.startsWith('sgroup:')) {
+    selectedSessions.clear();
+    selectionAnchor = undefined;
+    return groups?.pick(choice);
+  }
   // Panes closed while the menu was open are left out.
   const still = list.filter((r) => !r.view || views.get(r.view.pane.id) === r.view);
   const liveShells = shells.filter((v) => views.get(v.pane.id) === v);
@@ -3917,13 +4139,14 @@ async function confirmClose(rows: SessionRow[]): Promise<boolean> {
   return askDialog(`Close ${rows.length} sessions?\n\n${why.join(', ')}. Their conversations are kept and can be resumed.`, { ok: 'Close' });
 }
 
-async function sessionRowMenu(r: SessionRow, at: MenuAnchor) {
+async function sessionRowMenu(r: SessionRow, at: MenuAnchor, groups?: GroupMenu) {
   if (pendingSessions.has(r.sessionId)) return;
   const canClose = Boolean(r.view) || r.live;
   const choice = await showMenu(
     [
       { label: r.view ? 'Show Session' : 'Open in Liszt', id: 'open', key: 'o', enabled: Boolean(r.open) },
       { label: r.unread ? 'Mark as Read' : 'Mark as Unread', id: 'unread', key: 'u' },
+      ...(groups ? (['separator', ...groups.entries] as MenuEntry[]) : []),
       'separator',
       { label: 'Close Session', id: 'close', key: 'c', enabled: canClose },
       r.archived ? { label: 'Unarchive', id: 'unarchive', key: 'a' } : { label: canClose ? 'Close and Archive' : 'Archive', id: 'archive', key: 'a' },
@@ -3942,6 +4165,7 @@ async function sessionRowMenu(r: SessionRow, at: MenuAnchor) {
   );
   // Its pane may have been closed while the menu was open.
   if (r.view && views.get(r.view.pane.id) !== r.view) return;
+  if (choice?.startsWith('sgroup:')) return groups?.pick(choice);
   switch (choice) {
     case 'open':
       return r.open?.();
@@ -4099,6 +4323,7 @@ async function finishDelete(rows: SessionRow[]) {
 
 function deleted(sessionId: string) {
   state.sessionMarks[sessionId] = { deleted: true, at: Date.now() };
+  unfileSession(sessionId);
   agents = agents.filter((a) => a.sessionId !== sessionId);
   // A task would otherwise resume the deleted conversation; it starts a new one in its worktree instead.
   for (const project of state.projects) for (const task of project.tasks) if (task.sessionId === sessionId) task.sessionId = undefined;
