@@ -1969,8 +1969,8 @@ function renderProjectTree() {
   const hiddenCount = (state.hiddenFolders ?? []).length;
   if (hiddenCount && !terms.length && state.sessionFilter !== 'archived') {
     const note = h('div', 'ptree-more ptree-hidden-note', `${hiddenCount} hidden ${hiddenCount === 1 ? 'folder' : 'folders'} · show`);
-    note.title = 'Show → Archived lists the sessions of hidden folders; right-click a folder there to show it again';
-    note.addEventListener('click', () => setSessionFilter('archived'));
+    note.title = 'Click to show a hidden folder or project again, or to list their sessions';
+    note.addEventListener('click', () => void hiddenMenu(note));
     els.push(note);
   }
   if (!els.length) els.push(h('div', 'side-note', 'Nothing matches.'));
@@ -2193,6 +2193,40 @@ function treeFolders(sessions: TreeSession[], searching: boolean): HTMLElement[]
     });
     return open ? [row, treeBranch(`folder:${dir}`, list)] : [row];
   });
+}
+
+/** The hidden folders and projects, each to be shown again, and their sessions under Archived. */
+async function hiddenMenu(at: MenuAnchor) {
+  const hidden = state.hiddenFolders ?? [];
+  const choice = await showMenu(
+    [
+      ...hidden.map((dir) => ({ label: `Show ${folderLabel(dir)}`, id: `show:${dir}` })),
+      'separator',
+      { label: 'List Their Sessions', id: 'archived', key: 'l' },
+    ],
+    at,
+  );
+  if (choice === 'archived') return setSessionFilter('archived');
+  if (choice?.startsWith('show:')) showHidden(choice.slice('show:'.length));
+}
+
+/** Shown again, a hidden project folder comes back as the always-open project it was. */
+function showHidden(dir: string) {
+  hideFolder(dir, false);
+  void syncPinned();
+}
+
+/**
+ * Hides an always-open project: its folder joins the hidden folders, so it is not opened again and
+ * its sessions leave the tree as a hidden folder's do. Its panes close as a closed project's do.
+ */
+async function hideProject(project: ProjectState) {
+  if (projectBusy(project) && !(await askDialog(`${project.name} has sessions still working. Hide the project?`, { ok: 'Hide' }))) return;
+  if (!state.projects.includes(project)) return;
+  const key = trimPath(project.path);
+  state.hiddenFolders = [...(state.hiddenFolders ?? []).filter((f) => f !== key), key];
+  project.pinned = undefined;
+  await closeProject(project, { ask: false });
 }
 
 /** A folder's menu: open it as a project, hide it from Liszt or show it again, archive its sessions. */
@@ -2659,7 +2693,8 @@ async function projectMenu(project: ProjectState, at: MenuAnchor) {
     { label: 'Open Terminal Here', id: 'shell', key: 's' },
     { label: 'Reveal in Finder', id: 'reveal', key: 'f' },
     'separator',
-    { label: project.pinned ? 'Close Project (always open)' : 'Close Project', id: 'close', key: 'c', enabled: !project.pinned },
+    // An always-open project cannot close, but it can be hidden until shown again.
+    project.pinned ? { label: 'Hide Project', id: 'hide', key: 'h' } : { label: 'Close Project', id: 'close', key: 'c' },
   );
   const choice = await showMenu(entries, at);
   // The project may have been closed while the menu was open.
@@ -2705,6 +2740,8 @@ async function projectMenu(project: ProjectState, at: MenuAnchor) {
       return api.reveal(project.path);
     case 'close':
       return closeProject(project);
+    case 'hide':
+      return void hideProject(project);
   }
 }
 
@@ -2751,7 +2788,9 @@ let projectAgents: Record<string, string[]> = {};
 async function syncPinned() {
   pinnedAt = Date.now();
   const list = await api.pinnedProjects();
-  const dirs = new Set(list.dirs);
+  // A project folder hidden from Liszt is not opened again until it is shown.
+  const hidden = new Set(state.hiddenFolders ?? []);
+  const dirs = new Set(list.dirs.filter((d) => !hidden.has(trimPath(d))));
   let changed = list.roots.join('\n') !== pinnedRoots.join('\n') || JSON.stringify(list.agents) !== JSON.stringify(projectAgents);
   pinnedRoots = list.roots;
   projectAgents = list.agents;
