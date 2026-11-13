@@ -35,6 +35,10 @@ export interface PaneState {
   bgId?: string;
   /** Claude finished a turn while the user was elsewhere, or the user marked the session unread. */
   unread?: boolean;
+  /** The last prompt the user sent, on one line, for the session's hover card. */
+  lastPrompt?: string;
+  /** Prompts queued from the session's menu; each is sent when the turn before it has ended. */
+  queued?: string[];
   /**
    * Claude had work under way when Liszt last saw it. A background session keeps going after Liszt
    * quits; found idle on the next start, it finished meanwhile and its reply is unread.
@@ -283,6 +287,8 @@ export interface TranscriptSession {
   cwd: string;
   /** What ran it: `cli` (a terminal, Liszt's panes included), `claude-desktop`, `sdk-cli`… */
   entrypoint?: string;
+  /** The last prompt the user sent, on one line. */
+  lastPrompt?: string;
   lastActivityAt: number;
   /** Its folder no longer exists, so it cannot be resumed. */
   gone?: boolean;

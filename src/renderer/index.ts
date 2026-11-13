@@ -40,7 +40,7 @@ import { ChatView, type PromptRef } from './chat';
 import { h, iconEl } from './dom';
 import { ICONS, KIND_GLYPH } from './icons';
 import { leaf, panesIn, removePane, replacePane, splitPane, type Side } from './layout';
-import { ask as askDialog, tell } from './dialog';
+import { ask as askDialog, askText, tell } from './dialog';
 import { undoNewest, undoToast } from './toast';
 import { hoverTip } from './tip';
 import { closeMenu, dropdown, showMenu, type MenuAnchor, type MenuEntry } from './menu';
@@ -119,6 +119,8 @@ interface PaneView {
   /** A command the shell runs once it is up, typed in as if by hand. */
   run?: string;
   runTimer?: number;
+  /** Set while a queued prompt waits its moment to be sent (see sendQueued). */
+  queueTimer?: number;
   /** A draft the chat had, pasted at Claude Code's prompt once the terminal has drawn it. */
   typeIn?: string;
   /** Asked to switch between chat and terminal while working; it switches when the turn ends. */
@@ -1057,6 +1059,58 @@ function setStatus(v: PaneView, status: Status, keepSince = false) {
     save();
   }
   paintStatus(v);
+  if (isAtRest(v)) sendQueued(v);
+}
+
+// --- Queued prompts ----------------------------------------------------------------------------
+// A prompt queued from a session's menu waits in Liszt and is sent once the session's turn has
+// ended and it sits at its prompt, one prompt a turn. Unlike a prompt typed into Claude Code while
+// it works, it is never taken up in the middle of the turn, and the session need not be in sight.
+
+const QUEUE_SETTLE = 800;
+const QUEUE_RETRY = 2000;
+
+async function queuePrompt(v: PaneView) {
+  const text = await askText(`Queue a prompt for "${displayTitle(v)}"\n\n${isWorking(v) ? 'It is sent when the turn under way has ended.' : 'The session is at rest, so it is sent right away.'}`, {
+    ok: 'Queue',
+    placeholder: 'What should Claude do next?',
+  });
+  if (!text || views.get(v.pane.id) !== v) return;
+  (v.pane.queued ??= []).push(text);
+  save();
+  queueRender(true);
+  // A session not started yet starts for it; its first prompt goes once it is up.
+  if (!v.spawned || v.status === 'exited') void spawn(v, continues(v.pane));
+  else sendQueued(v);
+}
+
+function clearQueued(v: PaneView) {
+  v.pane.queued = undefined;
+  clearTimeout(v.queueTimer);
+  v.queueTimer = undefined;
+  save();
+  queueRender(true);
+}
+
+/** Sends the first queued prompt once the session has settled at its prompt. */
+function sendQueued(v: PaneView, wait = QUEUE_SETTLE) {
+  if (!v.pane.queued?.length || v.queueTimer) return;
+  v.queueTimer = window.setTimeout(() => {
+    v.queueTimer = undefined;
+    if (views.get(v.pane.id) !== v || !v.pane.queued?.length || !v.spawned || !isAtRest(v)) return;
+    const terminal = inTerminal(v);
+    // In the terminal the prompt box must be showing and empty: a menu, a question or a draft the
+    // user is typing has the keyboard otherwise.
+    if (terminal && terminalDraft(v) !== '') return sendQueued(v, QUEUE_RETRY);
+    const text = v.pane.queued.shift()!;
+    if (!v.pane.queued.length) v.pane.queued = undefined;
+    save();
+    queueRender(true);
+    if (!terminal) return sendChat(v, text, []);
+    api.write(v.pane.id, `\x1b[200~${text}\x1b[201~`);
+    // Sent with the paste, the Enter would read as a new line of it.
+    setTimeout(() => views.get(v.pane.id) === v && api.write(v.pane.id, '\r'), 300);
+  }, wait);
 }
 
 /** Shows a session's status everywhere it appears. */
@@ -1348,6 +1402,11 @@ async function sessionMenu(v: PaneView, from: 'tab' | 'head', at: MenuAnchor, gr
     const label = v.pane.terminal ? 'Show as Chat' : 'Show in Terminal';
     entries.push({ label: v.switchPending ? `Stay in the ${v.pane.terminal ? 'Terminal' : 'Chat'}` : isWorking(v) ? `${label} When Done` : label, id: 'toggle-view', key: 'e' });
   }
+  if (v.pane.kind === 'claude') {
+    entries.push({ label: 'Queue Prompt…', id: 'queue', key: 'q' });
+    const queued = v.pane.queued?.length ?? 0;
+    if (queued) entries.push({ label: `Clear ${queued} Queued ${queued === 1 ? 'Prompt' : 'Prompts'}`, id: 'queue-clear', key: 'x' });
+  }
   if (v.pane.kind === 'claude') entries.push({ label: 'Copy Session ID', id: 'copy-id', key: 'i', enabled: v.pane.started });
   if (groups) entries.push('separator', ...groups.entries);
   entries.push('separator', { label: 'Close Session', id: 'close', key: 'c' }, { label: 'Close Other Sessions', id: 'close-others', key: 'o', enabled: project.panes.length > 1 });
@@ -1381,6 +1440,10 @@ async function sessionMenu(v: PaneView, from: 'tab' | 'head', at: MenuAnchor, gr
       return switchView(v);
     case 'copy-id':
       return api.copy(v.pane.sessionId);
+    case 'queue':
+      return void queuePrompt(v);
+    case 'queue-clear':
+      return clearQueued(v);
     case 'close':
       return void closePane(v);
     case 'close-others':
@@ -2575,6 +2638,8 @@ function treeSession(s: TreeSession): HTMLElement {
   if (s.row?.pinned) el.append(iconEl(ICONS.pin, 'srow-pin'));
   el.append(h('span', 'ptree-session-title', s.title));
   if (s.chip) el.append(h('span', 'ptree-session-chip', s.chip));
+  const queued = v?.pane.queued?.length;
+  if (queued) el.append(h('span', 'ptree-session-chip ptree-queued', `+${queued} queued`));
   const close = iconEl(ICONS.close, 'ptree-close');
   if (v) {
     close.title = withKey('Close session', 'close-pane');
@@ -2639,8 +2704,11 @@ function showTreeCard(key: string, el: HTMLElement, s: TreeSession, now = false)
     const where = v ? [v.project.name, v.pane.branch ? `⎇ ${v.pane.branch}` : ''].filter(Boolean).join(' · ') : (s.row?.cwd ?? '');
     if (where) lines.push(h('div', 'tree-card-where', where));
     if (time) lines.push(h('div', 'tree-card-time', `Updated ${duration(Date.now() - time)} ago · ${clockTime(time)}`));
-    const detail = s.row?.detail ?? (v ? v.activity : '');
+    // What the user last asked, rather than the tool Claude ran last.
+    const prompt = v ? (v.pane.lastPrompt ?? lastPrompts.get(v.pane.sessionId)) : s.row && lastPrompts.get(s.row.sessionId);
+    const detail = prompt ? `› ${prompt}` : v ? '' : (s.row?.detail ?? '');
     if (detail) lines.push(h('div', 'tree-card-detail', detail));
+    for (const text of v?.pane.queued ?? []) lines.push(h('div', 'tree-card-detail tree-card-queued', `Queued · ${text}`));
     treeCard.replaceChildren(...lines);
     treeCard.classList.add('open');
     const box = el.getBoundingClientRect();
@@ -4586,8 +4654,13 @@ function onAppSessions(list: AppSession[]) {
   queueRender();
 }
 
+/** Each session's last prompt as its transcript records it, for the hover card. */
+const lastPrompts = new Map<string, string>();
+
 function onTranscriptSessions(list: TranscriptSession[]) {
   transcriptSessions = list;
+  lastPrompts.clear();
+  for (const t of list) if (t.lastPrompt) lastPrompts.set(t.sessionId, t.lastPrompt);
   queueRender();
 }
 
@@ -4704,10 +4777,17 @@ function fillBgCard() {
     const where = r.view ? `${r.where} · in Liszt` : `${folderName(r.cwd)} · not in Liszt`;
     text.append(h('div', 'bg-card-title', r.title), h('div', 'bg-card-where', where));
     row.append(h('span', `dot ${r.dot}`), text, h('span', r.chip[0], r.chip[1]));
-    row.title = r.view ? 'Show this session' : `${r.cwd}\nClick to open in Liszt`;
+    row.title = `${r.view ? 'Click to show this session' : `${r.cwd}\nClick to open in Liszt`}, right-click for more`;
     row.addEventListener('click', () => {
       closeBgCard();
       r.open?.();
+    });
+    // The same menu the session has in the tree: close, archive, delete, mark unread and the rest.
+    row.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      closeBgCard();
+      if (r.view) void sessionMenu(r.view, 'head', pointer(e));
+      else void sessionRowMenu(r, pointer(e));
     });
     return row;
   });
@@ -4896,6 +4976,7 @@ function onHook(ev: HookEvent) {
       // New work: what the last one shipped no longer describes the session.
       markShipped(v.pane.sessionId);
       if (ev.prompt) {
+        v.pane.lastPrompt = ev.prompt.replace(/\s+/g, ' ').trim().slice(0, 300) || undefined;
         const line = ev.prompt.split('\n')[0];
         v.activity = `› ${line}`;
         if (!v.pane.title) {

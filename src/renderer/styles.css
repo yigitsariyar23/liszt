@@ -2585,6 +2585,21 @@ button.task-section-head:hover {
   overflow-wrap: anywhere;
 }
 
+.tree-card-detail {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.tree-card-queued {
+  color: var(--accent);
+}
+
+.ptree-queued {
+  color: var(--accent);
+}
+
 .tree-card-time {
   margin-top: 3px;
   color: var(--faint);
@@ -2657,6 +2672,26 @@ button.task-section-head:hover {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
   user-select: text;
+}
+
+.dialog-input {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg, #111113);
+  color: var(--text);
+  font: inherit;
+  line-height: 1.45;
+  resize: vertical;
+  outline: none;
+  user-select: text;
+}
+
+.dialog-input:focus {
+  border-color: var(--accent);
 }
 
 .dialog-buttons {

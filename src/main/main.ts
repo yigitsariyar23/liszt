@@ -1340,6 +1340,7 @@ async function readTranscript(file: string): Promise<TranscriptSession | null> {
           title,
           cwd,
           entrypoint: entrypoint || undefined,
+          lastPrompt: lastPrompt || undefined,
           lastActivityAt: stat.mtimeMs,
         }
       : null;

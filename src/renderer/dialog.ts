@@ -27,6 +27,63 @@ export function tell(message: string): Promise<void> {
   return enqueue(() => open(message, 'OK', null, false)).then(() => undefined);
 }
 
+/**
+ * Asks for some text; resolves with it trimmed, or null when cancelled or left empty. Enter sends,
+ * Shift+Enter starts a new line, Esc cancels.
+ */
+export function askText(message: string, { ok = 'OK', placeholder = '' }: { ok?: string; placeholder?: string } = {}): Promise<string | null> {
+  return enqueue(
+    () =>
+      new Promise<string | null>((resolve) => {
+        const done = new AbortController();
+        const previous = document.activeElement as HTMLElement | null;
+        const [title, ...rest] = message.split(/\n\n/);
+        const backdrop = h('div', 'dialog-backdrop');
+        const box = h('div', 'dialog');
+        box.setAttribute('role', 'dialog');
+        box.setAttribute('aria-modal', 'true');
+        box.append(h('div', 'dialog-title', title));
+        if (rest.length) box.append(h('div', 'dialog-body', rest.join('\n\n')));
+        const input = h('textarea', 'dialog-input');
+        input.rows = 3;
+        input.placeholder = placeholder;
+        input.spellcheck = false;
+        const buttons = h('div', 'dialog-buttons');
+        const cancelButton = h('button', 'dialog-button', 'Cancel');
+        const okButton = h('button', 'dialog-button ok', ok);
+        buttons.append(cancelButton, okButton);
+        box.append(input, buttons);
+        backdrop.append(box);
+        document.body.append(backdrop);
+        input.focus();
+        const finish = (text: string | null) => {
+          done.abort();
+          backdrop.remove();
+          if (previous?.isConnected) previous.focus();
+          resolve(text?.trim() || null);
+        };
+        cancelButton.addEventListener('click', () => finish(null), { signal: done.signal });
+        okButton.addEventListener('click', () => finish(input.value), { signal: done.signal });
+        // Nothing typed here reaches the terminal behind the dialog.
+        window.addEventListener(
+          'keydown',
+          (e) => {
+            e.stopPropagation();
+            if (e.isComposing) return;
+            if (e.key === 'Escape') {
+              e.preventDefault();
+              finish(null);
+            } else if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              finish(input.value);
+            }
+          },
+          { capture: true, signal: done.signal },
+        );
+      }),
+  );
+}
+
 function enqueue<T>(run: () => Promise<T>): Promise<T> {
   const next = queue.then(run, run);
   queue = next.catch(() => undefined);
