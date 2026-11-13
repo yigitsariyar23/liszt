@@ -11,6 +11,7 @@ import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import * as pty from 'node-pty';
 import { SerializeAddon } from '@xterm/addon-serialize';
 import { Terminal } from '@xterm/headless';
@@ -47,6 +48,8 @@ const frame = (x: unknown) => `${JSON.stringify(x)}\n`;
 /** Reads a connection's JSON lines after its first. */
 function lines(conn: net.Socket, first: string, each: (m: Record<string, unknown>) => void) {
   let rest = first;
+  // Holds back a character cut in two by a chunk's border (pasted text, say).
+  const decoder = new StringDecoder('utf8');
   const take = () => {
     let nl: number;
     while ((nl = rest.indexOf('\n')) >= 0) {
@@ -60,7 +63,7 @@ function lines(conn: net.Socket, first: string, each: (m: Record<string, unknown
     }
   };
   conn.on('data', (d: Buffer) => {
-    rest += d.toString('utf8');
+    rest += decoder.write(d);
     take();
   });
   take();

@@ -4,6 +4,7 @@
 // shown the screen as the host kept it; otherwise a new shell starts.
 
 import * as net from 'node:net';
+import { StringDecoder } from 'node:string_decoder';
 import type { HostTerm } from '../shared/types';
 import { hostClient, type HostClient } from './hostclient';
 
@@ -52,22 +53,32 @@ export async function openShell(paneId: string, o: ShellStart): Promise<Shell | 
     ended = true;
     exitCb(code);
   };
-  let rest = '';
-  conn.on('data', (d: Buffer) => {
-    rest += d.toString('utf8');
-    let nl: number;
-    while ((nl = rest.indexOf('\n')) >= 0) {
-      const line = rest.slice(0, nl);
-      rest = rest.slice(nl + 1);
-      let m: { d?: unknown; exit?: unknown };
-      try {
-        m = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      if (typeof m.d === 'string') dataCb(m.d);
-      if ('exit' in m) end(typeof m.exit === 'number' ? m.exit : null);
+  // A line can run to megabytes (the whole screen and scrollback, on attaching) and arrive in many
+  // pieces: they are kept apart until its end comes, and only the new piece is searched for it. The
+  // decoder holds back a character cut in two by a piece's border.
+  const decoder = new StringDecoder('utf8');
+  let parts: string[] = [];
+  const take = (line: string) => {
+    let m: { d?: unknown; exit?: unknown };
+    try {
+      m = JSON.parse(line);
+    } catch {
+      return;
     }
+    if (typeof m.d === 'string') dataCb(m.d);
+    if ('exit' in m) end(typeof m.exit === 'number' ? m.exit : null);
+  };
+  conn.on('data', (d: Buffer) => {
+    const text = decoder.write(d);
+    let from = 0;
+    let nl: number;
+    while ((nl = text.indexOf('\n', from)) >= 0) {
+      parts.push(text.slice(from, nl));
+      take(parts.length === 1 ? parts[0] : parts.join(''));
+      parts = [];
+      from = nl + 1;
+    }
+    if (from < text.length) parts.push(text.slice(from));
   });
   conn.on('error', () => {});
   conn.on('close', () => end(null));

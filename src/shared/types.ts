@@ -80,6 +80,8 @@ export interface ProjectIcon {
   custom?: boolean;
   /** Drawn by Liszt because the project has no icon of its own; detection replaces it once one turns up. */
   generated?: boolean;
+  /** When the project was last looked through for an icon, so one without is not searched at every start. */
+  checkedAt?: number;
 }
 
 export type GroupColor = 'grey' | 'blue' | 'green' | 'yellow' | 'orange' | 'red' | 'pink' | 'purple' | 'cyan';

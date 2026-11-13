@@ -86,6 +86,8 @@ interface PaneView {
   /** The pane's terminal, made the first time it shows one. */
   term?: Terminal;
   fit?: FitAddon;
+  /** The terminal's GPU renderer, held only by the terminals shown most recently (see useGl). */
+  gl?: WebglAddon;
   termHost: HTMLElement;
   /** A Claude pane's conversation. */
   chat?: ChatView;
@@ -238,6 +240,7 @@ const apLimit = dropdown(
     void pump(project);
   },
 );
+const bgCountEl = byId('bg-count');
 const sessionListEl = byId('session-list');
 const sessionsCountEl = byId('sessions-count');
 const sessionSearch = byId<HTMLInputElement>('session-search');
@@ -303,11 +306,19 @@ function hue(text: string): number {
 }
 
 let saveTimer = 0;
+/** The state as last sent to be written; most saves follow an event that changed nothing kept. */
+let savedJson = '';
+function writeState() {
+  const json = JSON.stringify(state);
+  if (json === savedJson) return;
+  savedJson = json;
+  api.saveState(state);
+}
 function save() {
   clearTimeout(saveTimer);
-  saveTimer = window.setTimeout(() => api.saveState(state), 200);
+  saveTimer = window.setTimeout(writeState, 200);
 }
-window.addEventListener('beforeunload', () => api.saveState(state));
+window.addEventListener('beforeunload', writeState);
 
 // --- Keys --------------------------------------------------------------------------------------
 // Option stays a plain modifier so layouts that type @, [ or | with it keep working; the few
@@ -416,7 +427,8 @@ function createView(project: ProjectState, pane: PaneState): PaneView {
   };
   views.set(pane.id, v);
 
-  if (inTerminal(v)) ensureTerminal(v);
+  // The terminal itself is made when the session starts (see spawn), so the panes of projects not
+  // opened yet cost nothing.
   paintView(v);
   chat?.el.addEventListener('focusin', () => setFocused(v));
   chat?.el.addEventListener('keydown', () => setUnread(v, false));
@@ -500,15 +512,10 @@ function ensureTerminal(v: PaneView): Terminal {
   term.registerLinkProvider(mediaLinks(term, (e, target) => openLink(target, v, e)));
   term.registerLinkProvider(pathLinks(term, api, () => cwdOf(v), (e, target) => openLink(target, v, e)));
   term.open(v.termHost);
-  try {
-    const gl = new WebglAddon();
-    gl.onContextLoss(() => gl.dispose());
-    term.loadAddon(gl);
-  } catch {
-    // No WebGL: xterm keeps its DOM renderer.
-  }
   v.term = term;
   v.fit = fit;
+  // Made while its pane is already in sight, nothing resizes to fit it; the GPU renderer comes with the fit.
+  scheduleFit(v);
   if (pane.kind === 'claude') attachPromptActions(v, term);
 
   term.onData((data) => api.write(pane.id, data));
@@ -662,24 +669,36 @@ function bufferLine(term: Terminal, y: number): { text: string; shaded: boolean 
   return { text: line.translateToString(true), shaded: Boolean(first && !first.isBgDefault()) };
 }
 
+/** Whether a line of the buffer starts on a shaded background, without reading its text. */
+function isShaded(term: Terminal, y: number): boolean {
+  const first = term.buffer.active.getLine(y)?.getCell(0);
+  return Boolean(first && !first.isBgDefault());
+}
+
+/** Whether line `y` is the first line of a conversation prompt. */
+const isPromptStart = (term: Terminal, y: number) => isShaded(term, y) && bufferLine(term, y).text.startsWith('❯');
+
 /** The first line of the conversation prompt that line `y` is part of, or -1. */
 function promptStart(term: Terminal, y: number): number {
   for (let at = y, n = 0; at >= 0 && n < 60; at--, n++) {
-    const line = bufferLine(term, at);
-    if (!line.shaded) return -1;
-    if (line.text.startsWith('❯')) return at;
+    if (!isShaded(term, at)) return -1;
+    if (bufferLine(term, at).text.startsWith('❯')) return at;
   }
   return -1;
+}
+
+/** Whether a conversation prompt starts anywhere from line `from` down. */
+function hasPromptBelow(term: Terminal, from: number): boolean {
+  const length = term.buffer.active.length;
+  for (let y = from; y < length; y++) if (isPromptStart(term, y)) return true;
+  return false;
 }
 
 /** The first lines of the conversation prompts from line `from` down. */
 function promptsBelow(term: Terminal, from: number): number[] {
   const starts: number[] = [];
   const buf = term.buffer.active;
-  for (let y = from; y < buf.length; y++) {
-    const line = bufferLine(term, y);
-    if (line.shaded && line.text.startsWith('❯')) starts.push(y);
-  }
+  for (let y = from; y < buf.length; y++) if (isPromptStart(term, y)) starts.push(y);
   return starts;
 }
 
@@ -718,9 +737,10 @@ function attachPromptActions(v: PaneView, term: Terminal) {
     bar.hidden = true;
     start = -1;
   };
+  let screen: HTMLElement | null = null;
   v.termHost.addEventListener('mousemove', (e) => {
     if (bar.contains(e.target as Node)) return;
-    const screen = v.termHost.querySelector<HTMLElement>('.xterm-screen');
+    if (!screen?.isConnected) screen = v.termHost.querySelector<HTMLElement>('.xterm-screen');
     if (!screen || !v.pane.started || !inTerminal(v)) return hide();
     const r = screen.getBoundingClientRect();
     const rowH = r.height / term.rows;
@@ -729,7 +749,7 @@ function attachPromptActions(v: PaneView, term: Terminal) {
     const at = promptStart(term, term.buffer.active.viewportY + row);
     if (at < 0) return hide();
     start = at;
-    rewind.hidden = promptsBelow(term, at + 1).length === 0;
+    rewind.hidden = !hasPromptBelow(term, at + 1);
     const host = v.termHost.getBoundingClientRect();
     const top = Math.max(0, at - term.buffer.active.viewportY) * rowH;
     bar.style.top = `${r.top - host.top + top}px`;
@@ -831,12 +851,62 @@ function clearRewoundPrompt(v: PaneView) {
   api.write(v.pane.id, '\x15\x7f'.repeat(want.lines) + '\x15');
 }
 
+// A page may hold only so many WebGL contexts (16 in Chromium): past that the oldest is lost, and
+// its terminal falls back to the much slower DOM renderer for good. So only the terminals shown
+// most recently hold one; a terminal that has waited in the background longest gives its own up
+// and takes a new one when it is shown again.
+
+/** The terminals with a GPU renderer, the one shown longest ago first. */
+const glViews: PaneView[] = [];
+/** How many terminals keep a GPU renderer while out of sight. */
+const GL_KEPT = 8;
+/** Terminals in sight all get one, up to what the page can hold with room to spare. */
+const GL_MAX = 14;
+
+function dropGl(v: PaneView) {
+  const i = glViews.indexOf(v);
+  if (i >= 0) glViews.splice(i, 1);
+  const gl = v.gl;
+  v.gl = undefined;
+  try {
+    gl?.dispose();
+  } catch {
+    // Its terminal is gone already.
+  }
+}
+
+/** Gives a terminal in sight the GPU renderer, taking it from the one out of sight longest. */
+function useGl(v: PaneView) {
+  if (!v.term) return;
+  const i = glViews.indexOf(v);
+  if (i >= 0) glViews.splice(i, 1);
+  if (!v.gl) {
+    if (glViews.length >= GL_MAX) return;
+    try {
+      const gl = new WebglAddon();
+      gl.onContextLoss(() => v.gl === gl && dropGl(v));
+      v.term.loadAddon(gl);
+      v.gl = gl;
+    } catch {
+      // No WebGL: xterm keeps its DOM renderer.
+      return;
+    }
+  }
+  glViews.push(v);
+  for (let n = 0; glViews.length > GL_KEPT && n < glViews.length; ) {
+    const old = glViews[n];
+    if (old === v || old.el.offsetParent !== null) n++;
+    else dropGl(old);
+  }
+}
+
 function scheduleFit(v: PaneView) {
   if (!v.term || !v.fit) return;
   const { term, fit } = v;
   requestAnimationFrame(() => {
     // Background tabs and hidden projects measure as zero; they fit again once shown.
-    if (!v.el.isConnected || v.el.offsetParent === null) return;
+    if (v.term !== term || !v.el.isConnected || v.el.offsetParent === null) return;
+    useGl(v);
     try {
       fit.fit();
     } catch {
@@ -887,6 +957,7 @@ async function spawn(v: PaneView, resume: boolean, prompt?: string, resumeAt?: s
   v.hooked = false;
   v.unannounced = undefined;
   setStatus(v, v.pane.kind === 'claude' ? 'starting' : 'idle');
+  if (inTerminal(v)) ensureTerminal(v);
   try {
     v.fit?.fit();
   } catch {
@@ -993,10 +1064,41 @@ function paintStatus(v: PaneView) {
   renderChip(v);
   renderActions(v);
   paintSessionTab(v);
-  renderTabs();
   renderTaskChips();
-  renderSessions();
+  queueRender(true);
   updateBadge();
+}
+
+// What sessions report (a status, a tool call, the lists Claude Code is asked for) can change many
+// times in a moment, and each change redraws the project tabs or tree and the Sessions panel from
+// scratch. Those redraws are gathered into one, drawn with the next frame and no sooner than a
+// moment after the last. What the user does redraws at once, as its code goes on to use the rows
+// it drew, and takes a redraw still waiting with it.
+let renderQueued = false;
+let tabsQueued = false;
+let sessionsQueued = false;
+let renderedAt = -Infinity;
+/** The least time between two gathered redraws. */
+const RENDER_GAP = 100;
+
+/** Redraws the Sessions panel, and with `tabs` the project tabs or tree, soon. */
+function queueRender(tabs = false) {
+  tabsQueued ||= tabs;
+  sessionsQueued = true;
+  if (renderQueued) return;
+  renderQueued = true;
+  const draw = () =>
+    requestAnimationFrame(() => {
+      renderQueued = false;
+      renderedAt = performance.now();
+      const tabs = tabsQueued;
+      // In the tree the sessions are the projects' branches, so one redraw of it does for both.
+      if (sessionsQueued && !(tabs && inSidebar())) renderSessions();
+      if (tabs && tabsQueued) renderTabs();
+    });
+  const wait = RENDER_GAP - (performance.now() - renderedAt);
+  if (wait > 0) setTimeout(draw, wait);
+  else draw();
 }
 
 function renderTitle(v: PaneView) {
@@ -1027,7 +1129,8 @@ function chipText(v: PaneView): string {
     case 'exited':
       return v.exitCode ? `Exited (${v.exitCode})` : 'Exited';
     default:
-      return 'Starting';
+      // A session not shown since launch has not been started yet.
+      return v.spawned ? 'Starting' : 'Not started';
   }
 }
 
@@ -1358,6 +1461,7 @@ function renderLayout(project: ProjectState) {
     if (v) scheduleFit(v);
   }
   if (hadFocus && focusedPaneId && visible.includes(focusedPaneId)) views.get(focusedPaneId) && focusView(views.get(focusedPaneId)!);
+  startShown(project);
   if (project.id === state.activeProjectId) paintSessionTabs();
 }
 
@@ -1514,6 +1618,7 @@ async function closePane(v: PaneView, { ask = true, stop = true } = {}): Promise
   api.kill(v.pane.id);
   if (v.pane.kind === 'claude' && stop) api.stopBackground(v.pane.sessionId, v.pane.bgId);
   keepUnread(v.pane);
+  dropGl(v);
   v.term?.dispose();
   v.chat?.exited('Closed');
   v.el.remove();
@@ -1827,6 +1932,9 @@ function normalizeGroups() {
 const inSidebar = () => state.projectList === 'sidebar';
 
 function renderTabs() {
+  tabsQueued = false;
+  // The tree shows the sessions too.
+  if (inSidebar()) sessionsQueued = false;
   // Replacing the tab being dragged or renamed would cancel that; rebuild once it ends.
   if (dragProjectId || dragGroupId || document.querySelector('#tabs [contenteditable="true"], #project-tree [contenteditable="true"]')) {
     tabsDirty = true;
@@ -1939,7 +2047,7 @@ function treeSessions(terms: string[]): { byProject: Map<string, TreeSession[]>;
   }
   const elsewhere: TreeSession[] = [];
   for (const r of rows.filter((r) => !r.view)) {
-    const p = projectFor(r.cwd);
+    const p = r.home;
     if (terms.length && !matches(`${r.title} ${r.where} ${r.detail}${p ? ` ${p.name} ${p.path}` : ''}`)) continue;
     const item: TreeSession = { title: r.title, dot: r.dot, chip: r.chip[1], kind: 'claude', row: r };
     (p ? byProject.get(p.id)! : elsewhere).push(item);
@@ -2474,7 +2582,14 @@ function treeSession(s: TreeSession): HTMLElement {
   }
   el.addEventListener('mouseenter', () => showTreeCard(key, el, s));
   el.addEventListener('mouseleave', () => hideTreeCard(true));
-  if (treeCardKey === key) requestAnimationFrame(() => el.isConnected && showTreeCard(key, el, s, true));
+  // The row was drawn again under the card: it stays only while the pointer is still on the row.
+  if (treeCardKey === key)
+    requestAnimationFrame(() => {
+      if (treeCardKey !== key || !el.isConnected) return;
+      const under = pointerAt && document.elementFromPoint(pointerAt.x, pointerAt.y);
+      if (under && el.contains(under)) showTreeCard(key, el, s, true);
+      else hideTreeCard();
+    });
   el.addEventListener('click', (e) => {
     hideTreeCard();
     if (v && close.contains(e.target as Node)) return void closePane(v);
@@ -2539,6 +2654,23 @@ function showTreeCard(key: string, el: HTMLElement, s: TreeSession, now = false)
   if (now || treeCard.classList.contains('open')) fill();
   else treeCardTimer = setTimeout(fill, 450);
 }
+
+// A redraw replaces the row the pointer was on, and the row that went gets no mouseleave. So the
+// card also goes by where the pointer is: off every session row, or out of the window.
+let pointerAt: { x: number; y: number } | null = null;
+window.addEventListener(
+  'mousemove',
+  (e) => {
+    pointerAt = { x: e.clientX, y: e.clientY };
+    if (treeCardKey && !(e.target as Element).closest?.('.ptree-session')) hideTreeCard();
+  },
+  { capture: true, passive: true },
+);
+document.documentElement.addEventListener('mouseleave', () => {
+  pointerAt = null;
+  hideTreeCard();
+});
+window.addEventListener('blur', () => hideTreeCard());
 
 /** `soon` leaves a moment to reach the next row, which then takes the card over without the wait. */
 function hideTreeCard(soon: unknown = false) {
@@ -2803,11 +2935,28 @@ function foldProjects(projects: ProjectState[], folded: boolean) {
   save();
 }
 
-async function detectIcon(project: ProjectState) {
-  project.icon = await api.projectIcon(project.path);
-  renderTabs();
-  save();
+// Looking for a project's icon searches its folder (a Unity project's whole Assets), so the
+// projects are looked through one at a time.
+let iconQueue: Promise<unknown> = Promise.resolve();
+
+function detectIcon(project: ProjectState): Promise<void> {
+  const before = project.icon;
+  const done = iconQueue.then(async () => {
+    if (!state.projects.includes(project)) return;
+    const icon = await api.projectIcon(project.path);
+    // Chosen by hand while it waited.
+    if (project.icon !== before && project.icon?.custom) return;
+    const same = project.icon?.image === icon.image && project.icon?.kind === icon.kind;
+    project.icon = { ...icon, checkedAt: Date.now() };
+    if (!same) renderTabs();
+    save();
+  });
+  iconQueue = done.catch(() => {});
+  return done;
 }
+
+/** How long a project found to have no icon of its own goes before it is looked through again. */
+const ICON_RECHECK = 24 * 60 * 60 * 1000;
 
 async function projectMenu(project: ProjectState, at: MenuAnchor) {
   const others = state.projects.filter((p) => p !== project);
@@ -2910,17 +3059,28 @@ async function projectMenu(project: ProjectState, at: MenuAnchor) {
   }
 }
 
+/** Set once the saved projects are drawn; until then nothing starts. */
+let booted = false;
+
+/**
+ * A session starts the first time it is shown: opening a project starts the ones in its tiles, and
+ * its other sessions wait as tabs until they are clicked. A long list of sessions stays cheap so.
+ */
+function startShown(project: ProjectState) {
+  if (!booted || project.id !== state.activeProjectId) return;
+  for (const id of panesIn(project.layout)) {
+    const v = views.get(id);
+    if (v && !v.spawned) void spawn(v, continues(v.pane));
+  }
+}
+
 function activateProject(id: string | null) {
   state.activeProjectId = id;
   for (const [pid, stage] of stages) stage.classList.toggle('active', pid === id);
   emptyEl.hidden = state.projects.length > 0;
   const project = activeProject();
   if (project) {
-    // Sessions start the first time their project is opened, so a long project list stays cheap.
-    for (const pane of project.panes) {
-      const v = views.get(pane.id)!;
-      if (!v.spawned) void spawn(v, continues(pane));
-    }
+    startShown(project);
     for (const paneId of panesIn(project.layout)) scheduleFit(views.get(paneId)!);
     // Older states can still point at a pane that was closed.
     const last = project.activePaneId ? views.get(project.activePaneId) : undefined;
@@ -3251,6 +3411,7 @@ async function closeProject(project: ProjectState, { ask = true } = {}) {
     api.kill(pane.id);
     if (pane.kind === 'claude') api.stopBackground(pane.sessionId, pane.bgId);
     keepUnread(pane);
+    dropGl(v);
     v.term?.dispose();
     v.el.remove();
     views.delete(pane.id);
@@ -3669,6 +3830,8 @@ interface SessionRow {
   /** Missing when the session cannot be opened. */
   open?: () => void;
   view?: PaneView;
+  /** The open project its folder belongs to, when it has no pane. */
+  home?: ProjectState;
 }
 
 const SHOWS: Record<SessionFilter, (r: SessionRow) => boolean> = {
@@ -3709,7 +3872,7 @@ function askRepos(dirs: string[]): Promise<void> {
   for (const d of fresh) reposAsked.add(d);
   return api.repoOf(fresh).then((found) => {
     fresh.forEach((d, i) => repos.set(d, found[i] ?? null));
-    renderSessions();
+    queueRender(inSidebar());
   });
 }
 
@@ -3729,6 +3892,8 @@ const within = (sub: string, parent: string) => !parent || sub === parent || sub
  * The project a folder's sessions go under: the project of that very folder, otherwise the project
  * of the repository's main checkout when the folder is in one of its worktrees, such as an agent's.
  */
+const projectOf = (dir: string) => projectFor(dir);
+
 function projectFor(dir: string): ProjectState | undefined {
   const exact = state.projects.find((p) => samePath(p.path, dir));
   if (exact) return exact;
@@ -3826,13 +3991,20 @@ function sessionRows(): SessionRow[] {
   const ours = new Set<string>();
   const listed = new Set<string>();
   const rows: SessionRow[] = [];
+  // Hundreds of sessions share a few folders, so what depends on the folder alone is worked out once each.
+  const homes = new Map<string, ProjectState | undefined>();
+  const projectFor = (dir: string) => {
+    if (!homes.has(dir)) homes.set(dir, projectOf(dir));
+    return homes.get(dir);
+  };
+  const pinnedBg = new Set(agents.flatMap((a) => (a.pinned && a.id ? [a.id] : [])));
   for (const v of views.values()) {
     if (v.pane.kind !== 'claude') continue;
     ours.add(v.pane.sessionId);
     listed.add(v.pane.sessionId);
     if (v.pane.bgId) ours.add(v.pane.bgId);
     const s = app.get(v.pane.sessionId);
-    const pinnedAgent = agents.some((a) => a.pinned && a.id && a.id === v.pane.bgId);
+    const pinnedAgent = Boolean(v.pane.bgId && pinnedBg.has(v.pane.bgId));
     rows.push({
       group: 'liszt',
       sessionId: v.pane.sessionId,
@@ -3980,8 +4152,13 @@ function sessionRows(): SessionRow[] {
       open: () => void openSession(cwd, sessionId, title),
     });
   }
+  const anyHidden = (state.hiddenFolders ?? []).length > 0;
+  const hiddenDirs = new Map<string, boolean>();
   for (const r of rows) {
-    r.hidden = isHiddenFolder(r.cwd);
+    if (!r.view) r.home = projectFor(r.cwd);
+    if (!anyHidden) continue;
+    if (!hiddenDirs.has(r.cwd)) hiddenDirs.set(r.cwd, isHiddenFolder(r.cwd));
+    r.hidden = hiddenDirs.get(r.cwd)!;
     if (r.hidden && !r.view && !r.chip[1]) r.chip = ['chip', 'Hidden'];
   }
   // Outside Liszt an unread session shows it the way a pane does: once nothing is working in it.
@@ -4346,6 +4523,7 @@ async function finishLeftDeletes() {
 }
 
 function renderSessions() {
+  sessionsQueued = false;
   sessionChips.clear();
   // With the projects in the left panel, the sessions are the tree's branches.
   if (inSidebar()) {
@@ -4405,12 +4583,12 @@ async function openSession(cwd: string, sessionId: string, title: string, bgId?:
 
 function onAppSessions(list: AppSession[]) {
   appSessions = list;
-  renderSessions();
+  queueRender();
 }
 
 function onTranscriptSessions(list: TranscriptSession[]) {
   transcriptSessions = list;
-  renderSessions();
+  queueRender();
 }
 
 /**
@@ -4469,7 +4647,13 @@ function startTurn(v: PaneView) {
   if (task?.status === 'review') setTaskStatus(v.project, task, 'doing');
 }
 
+/** The agents list as last drawn; it is asked for every few seconds and mostly comes back the same. */
+let agentsJson = '';
+
 function onAgents(list: AgentSession[], asked: number) {
+  const json = JSON.stringify(list);
+  const same = json === agentsJson;
+  agentsJson = json;
   agents = list;
   agentsAsked = asked;
   for (const v of views.values()) {
@@ -4487,8 +4671,71 @@ function onAgents(list: AgentSession[], asked: number) {
     }
     syncAttached(v);
   }
-  renderSessions();
+  if (!same) {
+    paintBgCount();
+    queueRender();
+  }
 }
+
+/** The top bar's count of Claude Code background sessions that are open, in Liszt or not. */
+function paintBgCount() {
+  const open = agents.filter((a) => a.kind === 'background' && !a.ended);
+  const busy = open.filter((a) => a.status === 'busy').length;
+  bgCountEl.hidden = !open.length;
+  bgCountEl.textContent = `${open.length} background${busy ? ` · ${busy} working` : ''}`;
+  bgCountEl.title = `${open.length} Claude Code background ${open.length === 1 ? 'session' : 'sessions'} open${busy ? `, ${busy} working` : ''}\nClick to see which`;
+  if (!open.length) closeBgCard();
+  else if (bgCard.classList.contains('open')) fillBgCard();
+}
+
+// Clicking the count drops a card under it that lists those sessions: the working ones first, each
+// with its folder and whether a Liszt pane has it. A row goes to its pane, or opens the session in
+// one. A click elsewhere, Esc or leaving the window closes the card.
+const bgCard = h('div', 'bg-card');
+document.body.append(bgCard);
+
+function fillBgCard() {
+  const rows = sessionRows()
+    .filter((r) => r.bgId && r.live)
+    .sort((a, b) => a.rank - b.rank || b.time - a.time);
+  const els = rows.map((r) => {
+    const row = h('div', `bg-card-row${r.open ? '' : ' gone'}`);
+    const text = h('div', 'bg-card-text');
+    const where = r.view ? `${r.where} · in Liszt` : `${folderName(r.cwd)} · not in Liszt`;
+    text.append(h('div', 'bg-card-title', r.title), h('div', 'bg-card-where', where));
+    row.append(h('span', `dot ${r.dot}`), text, h('span', r.chip[0], r.chip[1]));
+    row.title = r.view ? 'Show this session' : `${r.cwd}\nClick to open in Liszt`;
+    row.addEventListener('click', () => {
+      closeBgCard();
+      r.open?.();
+    });
+    return row;
+  });
+  bgCard.replaceChildren(h('div', 'bg-card-head', `Claude Code background sessions · ${rows.length}`), ...els);
+  const box = bgCountEl.getBoundingClientRect();
+  const width = bgCard.getBoundingClientRect().width;
+  bgCard.style.top = `${box.bottom + 6}px`;
+  bgCard.style.left = `${Math.max(8, Math.min(box.left, window.innerWidth - width - 8))}px`;
+}
+
+function closeBgCard() {
+  bgCard.classList.remove('open');
+}
+
+bgCountEl.addEventListener('click', () => {
+  if (bgCard.classList.contains('open')) return closeBgCard();
+  bgCard.classList.add('open');
+  fillBgCard();
+});
+window.addEventListener('mousedown', (e) => {
+  if (!bgCard.contains(e.target as Node) && !bgCountEl.contains(e.target as Node)) closeBgCard();
+});
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !bgCard.classList.contains('open')) return;
+  e.preventDefault();
+  closeBgCard();
+}, true);
+window.addEventListener('blur', closeBgCard);
 
 // --- Chat --------------------------------------------------------------------------------------
 
@@ -4610,9 +4857,14 @@ function notify(v: PaneView, body: string, kind: NotifyKind) {
   api.notify({ title: `${v.project.name} · ${displayTitle(v)}`, body, paneId: v.pane.id, kind });
 }
 
+let badgeShown = '';
 function updateBadge() {
-  const waiting = [...views.values()].filter((v) => v.status === 'attention').length;
-  api.setBadge(waiting ? String(waiting) : '');
+  let waiting = 0;
+  for (const v of views.values()) if (v.status === 'attention') waiting++;
+  const text = waiting ? String(waiting) : '';
+  if (text === badgeShown) return;
+  badgeShown = text;
+  api.setBadge(text);
 }
 
 function onHook(ev: HookEvent) {
@@ -4663,7 +4915,7 @@ function onHook(ev: HookEvent) {
       if (shipped && shippedOf(v.pane.sessionId) !== 'merged') markShipped(v.pane.sessionId, shipped);
       // The user answered a permission prompt and the tool ran.
       if (v.status === 'attention') setStatus(v, 'running', true);
-      else renderSessions();
+      else queueRender();
       break;
     case 'Notification':
       if (v.status === 'running') {
@@ -4733,7 +4985,17 @@ async function refreshJobs() {
   renderJobs();
 }
 
+let jobsShown = '';
 function renderJobs() {
+  // Asked for every two seconds; the list is drawn again only when a row would read differently.
+  const shown = JSON.stringify(
+    shells.flatMap((shell) => {
+      const v = views.get(shell.id);
+      return v ? shell.jobs.map((job) => [shell.id, job.pgid, job.command, job.foreground, duration(Date.now() - job.since), v.project.name, displayTitle(v)]) : [];
+    }),
+  );
+  if (shown === jobsShown && jobListEl.childElementCount) return;
+  jobsShown = shown;
   const rows: HTMLElement[] = [];
   for (const shell of shells) {
     const v = views.get(shell.id);
@@ -4806,20 +5068,36 @@ function renderGit(g: GitInfo) {
 }
 
 let gitSeq = 0;
+/** The folder a git read is under way for, and what the panel last drew. */
+let gitBusy = '';
+let gitShown = '';
 async function refreshGit() {
   const project = activeProject();
   if (!project) {
     sideProjectEl.textContent = '';
     gitEl.replaceChildren();
+    gitShown = '';
     return;
   }
   const focused = focusedPaneId ? views.get(focusedPaneId) : undefined;
   const cwd = focused?.project === project && focused.pane.cwd ? focused.pane.cwd : project.path;
   sideProjectEl.textContent = cwd === project.path ? project.name : `${project.name} · worktree`;
-  if (state.sidebar !== 'changes') return;
+  if (state.sidebar !== 'changes' || document.hidden) return;
+  // A big repository can take longer than the next tick to answer; one read at a time per folder.
+  if (gitBusy === cwd) return;
   const seq = ++gitSeq;
-  const info = await api.gitInfo(cwd);
-  if (seq === gitSeq) renderGit(info);
+  gitBusy = cwd;
+  let info: GitInfo;
+  try {
+    info = await api.gitInfo(cwd);
+  } finally {
+    if (gitBusy === cwd) gitBusy = '';
+  }
+  if (seq !== gitSeq) return;
+  const shown = `${cwd}\n${JSON.stringify(info)}`;
+  if (shown === gitShown && gitEl.childElementCount) return;
+  gitShown = shown;
+  renderGit(info);
 }
 
 function setSidebar(view: SidebarView | null) {
@@ -5174,6 +5452,14 @@ setInterval(() => {
   }
   renderTaskChips();
 }, 1000);
+// The rows say how long ago each session started or was active, and the tree how long one has run;
+// those are brought up to date now and then: sooner while something is working.
+let ageTicks = 0;
+setInterval(() => {
+  if (document.hidden) return;
+  const working = [...views.values()].some(isWorking) || agents.some((a) => a.status === 'busy' && !a.ended);
+  if (working || ++ageTicks % 6 === 0) queueRender();
+}, 10_000);
 
 async function boot() {
   ({ shortcuts, claudeView } = await api.settings());
@@ -5212,11 +5498,14 @@ async function boot() {
   for (const project of state.projects) {
     for (const pane of project.panes) createView(project, pane);
     renderLayout(project);
-    if (!project.icon || (!project.icon.custom && (!project.icon.image || project.icon.generated))) void detectIcon(project);
+    const icon = project.icon;
+    const stale = Date.now() - (icon?.checkedAt ?? 0) > ICON_RECHECK;
+    if (!icon || (!icon.custom && (!icon.image || (icon.generated && stale)))) void detectIcon(project);
     // Every project tab starts folded.
     project.folded = true;
   }
   await syncPinned();
+  booted = true;
   const active = activeProject() ?? state.projects[0] ?? null;
   activateProject(active?.id ?? null);
   // Chats that kept running in the session host while Liszt was closed are attached to again in

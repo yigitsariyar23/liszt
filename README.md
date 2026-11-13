@@ -304,8 +304,10 @@ The defaults; Settings can change most of them.
   Code no longer recognizes come back with `claude --bg --resume <id>`.
   Sessions archived, deleted or marked unread outside Liszt in Sessions are also kept here, by
   session id, under `sessionMarks`.
-- Panes are only started when their project is first opened, so adding many projects doesn't slow
-  down launch.
+- A pane is only started the first time it is shown: opening a project starts the sessions in its
+  tiles, and its other sessions wait until they are clicked, so many projects and sessions don't
+  slow down launch. The top bar says how many Claude Code background sessions are open; clicking
+  it lists the running sessions.
 - The main process runs `claude agents --json --all` every 10 seconds and sends the list to the
   renderer. Entries that match a pane's session only show under In Liszt. Sessions pinned in the
   agents view are read from `~/.claude/jobs/pins.json`.

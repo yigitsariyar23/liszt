@@ -77,6 +77,53 @@ function send(channel: string, ...args: unknown[]) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, ...args);
 }
 
+// A program that prints a lot sends its output in thousands of small pieces a second, and each
+// would be a message to the window of its own. The first few pieces of a burst go at once, so
+// typing and a command's answer show without delay; what follows within a few milliseconds goes
+// together.
+const DATA_WINDOW = 4;
+/** Pieces sent at once in each window before the rest is held back. */
+const DATA_AT_ONCE = 4;
+const dataWaiting = new Map<string, { chunks: string[]; sent: number; timer: NodeJS.Timeout }>();
+
+function sendData(paneId: string, data: string) {
+  const waiting = dataWaiting.get(paneId);
+  if (waiting) {
+    if (waiting.chunks.length || ++waiting.sent > DATA_AT_ONCE) waiting.chunks.push(data);
+    else send('pty:data', paneId, data);
+    return;
+  }
+  send('pty:data', paneId, data);
+  const entry = {
+    chunks: [] as string[],
+    sent: 1,
+    timer: setInterval(() => {
+      // A window nothing came in ends the burst.
+      if (!entry.chunks.length && entry.sent <= 0) return dropData(paneId);
+      if (entry.chunks.length) send('pty:data', paneId, entry.chunks.join(''));
+      // A burst still held back stays held back, so a flood goes one message a window.
+      entry.sent = entry.chunks.length ? DATA_AT_ONCE : 0;
+      entry.chunks.length = 0;
+    }, DATA_WINDOW),
+  };
+  dataWaiting.set(paneId, entry);
+}
+
+/** Sends what a pane's terminal still holds back, before a message that must come after it. */
+function flushData(paneId: string) {
+  const waiting = dataWaiting.get(paneId);
+  if (waiting?.chunks.length) send('pty:data', paneId, waiting.chunks.join(''));
+  dropData(paneId);
+}
+
+/** Forgets what a pane's terminal holds back: its process was replaced or ended. */
+function dropData(paneId: string) {
+  const waiting = dataWaiting.get(paneId);
+  if (!waiting) return;
+  clearInterval(waiting.timer);
+  dataWaiting.delete(paneId);
+}
+
 // --- Login shell environment -------------------------------------------------------------------
 // Apps started from Finder or the Dock get a bare PATH. Read the login shell's environment once so
 // claude, git and whatever Claude runs (fastlane, gradle, unity...) see what a normal terminal sees.
@@ -687,6 +734,7 @@ ipcMain.handle('pty:spawn', async (_e, o: SpawnOptions): Promise<SpawnResult> =>
   const old = ptys.get(o.paneId);
   ptys.delete(o.paneId);
   old?.kill();
+  dropData(o.paneId);
   // A shell still running in the terminal host is attached to again below.
   shells.get(o.paneId)?.detach();
   shells.delete(o.paneId);
@@ -745,11 +793,12 @@ ipcMain.handle('pty:spawn', async (_e, o: SpawnOptions): Promise<SpawnResult> =>
     if (sh) {
       shells.set(o.paneId, sh);
       sh.onData((data) => {
-        if (shells.get(o.paneId) === sh) send('pty:data', o.paneId, data);
+        if (shells.get(o.paneId) === sh) sendData(o.paneId, data);
       });
       sh.onExit((code) => {
         if (shells.get(o.paneId) !== sh) return;
         shells.delete(o.paneId);
+        flushData(o.paneId);
         send('pty:exit', o.paneId, code ?? 1);
       });
       return { ok: true, sessionId, resumed: resume };
@@ -805,7 +854,7 @@ ipcMain.handle('pty:spawn', async (_e, o: SpawnOptions): Promise<SpawnResult> =>
   // A restarted pane reuses its id, so ignore anything the replaced process still emits.
   p.onData((data) => {
     if (ptys.get(o.paneId) !== p) return;
-    send('pty:data', o.paneId, data);
+    sendData(o.paneId, data);
     if (o.kind !== 'claude' || bgId) return;
     tail = (tail + data.replace(ANSI, '')).slice(-300);
     const m = BACKGROUNDED.exec(tail);
@@ -816,6 +865,7 @@ ipcMain.handle('pty:spawn', async (_e, o: SpawnOptions): Promise<SpawnResult> =>
   p.onExit(({ exitCode }) => {
     if (ptys.get(o.paneId) !== p) return;
     ptys.delete(o.paneId);
+    flushData(o.paneId);
     send('pty:exit', o.paneId, exitCode);
   });
   return { ok: true, sessionId, resumed: resume, bgId };
@@ -946,6 +996,7 @@ ipcMain.on('pty:resize', (_e, id: string, cols: number, rows: number) => {
 
 ipcMain.on('pty:kill', (_e, id: string) => {
   nextSpawn(id);
+  dropData(id);
   stopChat(id);
   shells.get(id)?.kill();
   shells.delete(id);
@@ -1096,17 +1147,56 @@ async function appPins(appDir: string): Promise<Set<string>> {
   return ids;
 }
 
-/** Session ids that still have a transcript; Claude Code deletes old ones. */
-async function transcriptIds(): Promise<Set<string>> {
-  const root = path.join(await claudeDir(), 'projects');
-  const ids = new Set<string>();
-  for (const dir of await readDir(root)) {
-    for (const name of await readDir(path.join(root, dir))) if (name.endsWith('.jsonl')) ids.add(name.slice(0, -'.jsonl'.length));
-  }
-  return ids;
+/** Every transcript Claude Code keeps, read once for each round of lists. */
+interface TranscriptScan {
+  /** Session ids that still have a transcript; Claude Code deletes old ones. */
+  ids: Set<string>;
+  /** The transcripts named by a session id, by path. */
+  files: string[];
 }
 
-async function listAppSessions(): Promise<AppSession[]> {
+async function scanTranscripts(): Promise<TranscriptScan> {
+  const root = path.join(await claudeDir(), 'projects');
+  const ids = new Set<string>();
+  const files: string[] = [];
+  const dirs = await readDir(root);
+  const names = await Promise.all(dirs.map((dir) => readDir(path.join(root, dir))));
+  dirs.forEach((dir, i) => {
+    for (const name of names[i]) {
+      if (!name.endsWith('.jsonl')) continue;
+      const id = name.slice(0, -'.jsonl'.length);
+      ids.add(id);
+      if (SESSION_ID.test(id)) files.push(path.join(root, dir, name));
+    }
+  });
+  return { ids, files };
+}
+
+/** Runs `each` over the items, a few at a time, and keeps their order. */
+async function mapLimit<T, R>(items: T[], limit: number, each: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await each(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
+/** Whether a folder is there, asked once per folder for a round of lists: many sessions share one. */
+function folderCheck(): (dir: string) => Promise<boolean> {
+  const asked = new Map<string, Promise<boolean>>();
+  return (dir) => {
+    let found = asked.get(dir);
+    if (!found) asked.set(dir, (found = fs.promises.access(dir).then(() => true, () => false)));
+    return found;
+  };
+}
+
+async function listAppSessions(scan: Promise<TranscriptScan>, exists: (dir: string) => Promise<boolean>): Promise<AppSession[]> {
   const appDir = path.join(app.getPath('appData'), 'Claude');
   const root = path.join(appDir, 'claude-code-sessions');
   const files: string[] = [];
@@ -1117,13 +1207,18 @@ async function listAppSessions(): Promise<AppSession[]> {
       }
     }
   }
-  for (const file of appSessionFiles.keys()) if (!files.includes(file)) appSessionFiles.delete(file);
-  const [pins, transcripts] = await Promise.all([appPins(appDir), transcriptIds()]);
+  const current = new Set(files);
+  for (const file of appSessionFiles.keys()) if (!current.has(file)) appSessionFiles.delete(file);
+  const [pins, { ids: transcripts }, sessions] = await Promise.all([appPins(appDir), scan, mapLimit(files, READS_AT_ONCE, readAppSessionFile)]);
   const list: AppSession[] = [];
-  for (const file of files) {
-    const s = await readAppSessionFile(file);
+  for (const s of sessions) {
     if (!s) continue;
-    const cwd = [s.cwd, s.originCwd].find((dir) => dir && fs.existsSync(dir));
+    let cwd: string | undefined;
+    for (const dir of [s.cwd, s.originCwd]) {
+      if (!dir || !(await exists(dir))) continue;
+      cwd = dir;
+      break;
+    }
     list.push({
       id: s.id,
       sessionId: s.sessionId,
@@ -1252,21 +1347,29 @@ async function readTranscript(file: string): Promise<TranscriptSession | null> {
   return session;
 }
 
-async function listTranscriptSessions(): Promise<TranscriptSession[]> {
-  const root = path.join(await claudeDir(), 'projects');
-  const files = new Set<string>();
-  for (const dir of await readDir(root)) {
-    for (const name of await readDir(path.join(root, dir))) {
-      if (name.endsWith('.jsonl') && SESSION_ID.test(name.slice(0, -'.jsonl'.length))) files.add(path.join(root, dir, name));
-    }
-  }
-  for (const file of transcriptFiles.keys()) if (!files.has(file)) transcriptFiles.delete(file);
+/** How many files a round of lists has open at a time; a first round reads every one of them. */
+const READS_AT_ONCE = 16;
+
+async function listTranscriptSessions(scan: Promise<TranscriptScan>, exists: (dir: string) => Promise<boolean>): Promise<TranscriptSession[]> {
+  const { files } = await scan;
+  const current = new Set(files);
+  for (const file of transcriptFiles.keys()) if (!current.has(file)) transcriptFiles.delete(file);
+  const sessions = await mapLimit(files, READS_AT_ONCE, readTranscript);
   const list: TranscriptSession[] = [];
-  for (const file of files) {
-    const s = await readTranscript(file);
-    if (s) list.push(fs.existsSync(s.cwd) ? s : { ...s, gone: true });
+  for (const s of sessions) {
+    if (s) list.push((await exists(s.cwd)) ? s : { ...s, gone: true });
   }
   return list;
+}
+
+/** The lists as the window last got them: asked for every few seconds, they mostly come back the same. */
+const listsSent = new Map<string, string>();
+
+function sendList(channel: string, list: unknown) {
+  const json = JSON.stringify(list);
+  if (listsSent.get(channel) === json) return;
+  listsSent.set(channel, json);
+  send(channel, list);
 }
 
 let pollingAgents = false;
@@ -1277,10 +1380,12 @@ async function pollAgents() {
     // Each list goes out as soon as it is ready: the first read of the transcripts takes a moment.
     // The agents list says when it was asked for, so the renderer can tell it from a hook it predates.
     const asked = Date.now();
+    const scan = scanTranscripts();
+    const exists = folderCheck();
     await Promise.all([
       listAgents().then((list) => list && send('agents', list, asked)),
-      listAppSessions().then((list) => send('app-sessions', list), () => {}),
-      listTranscriptSessions().then((list) => send('transcript-sessions', list), () => {}),
+      listAppSessions(scan, exists).then((list) => sendList('app-sessions', list), () => {}),
+      listTranscriptSessions(scan, exists).then((list) => sendList('transcript-sessions', list), () => {}),
     ]);
   } finally {
     pollingAgents = false;
@@ -1432,10 +1537,14 @@ ipcMain.handle('state:load', (): AppState | null => {
   }
 });
 
+let stateWritten = '';
 ipcMain.on('state:save', (_e, s: AppState) => {
+  const json = JSON.stringify(s, null, 2);
+  if (json === stateWritten) return;
   const tmp = `${statePath()}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(s, null, 2));
+  fs.writeFileSync(tmp, json);
   fs.renameSync(tmp, statePath());
+  stateWritten = json;
 });
 
 ipcMain.handle('dialog:pickFolder', async () => {
@@ -1478,23 +1587,39 @@ function onDisk(p: string, cwd: string): { file: string; line?: string; col?: st
   }
 }
 
+/** `onDisk` as a yes or no, without holding up the terminals' output while the disk answers. */
+async function isOnDisk(p: string, cwd: string): Promise<boolean> {
+  if (!/[^/~.]/.test(p.replace(/^file:\/\//i, ''))) return false;
+  try {
+    if (await fs.promises.stat(absolutePath(p, cwd)).then(() => true, () => false)) return true;
+    const m = /^(.+?):(\d+)(?::(\d+))?$/.exec(p);
+    if (!m) return false;
+    return await fs.promises.stat(absolutePath(m[1], cwd)).then((st) => st.isFile(), () => false);
+  } catch {
+    // An unreadable name is no path.
+    return false;
+  }
+}
+
 // A local path printed in a terminal: each candidate runs to the end of its stretch of text, and
 // the answer is the longest part of it, cut before a space or at its end, that names something on
 // disk; 0 when none does. A path may hold spaces, and words after it are not part of it.
 ipcMain.handle('paths:resolve', (_e, candidates: string[], cwd: string) =>
-  candidates.map((text) => {
-    // The spaces nearest the path's start: a long paragraph after a path has many more than a name
-    // could hold, and looking only at its last ones never reaches the path's own end.
-    const spaces: number[] = [];
-    for (let i = 1; i < text.length && spaces.length < 24; i++) if (text[i] === ' ') spaces.push(i);
-    const cuts = [text.length, ...spaces.reverse()];
-    for (const cut of cuts) {
-      const whole = text.slice(0, cut);
-      // A sentence's closing punctuation is not part of the path, unless the name really ends so.
-      for (const s of new Set([whole.replace(/[.,:;!?]+$/, ''), whole])) if (onDisk(s, cwd)) return s.length;
-    }
-    return 0;
-  }),
+  Promise.all(
+    candidates.map(async (text) => {
+      // The spaces nearest the path's start: a long paragraph after a path has many more than a name
+      // could hold, and looking only at its last ones never reaches the path's own end.
+      const spaces: number[] = [];
+      for (let i = 1; i < text.length && spaces.length < 24; i++) if (text[i] === ' ') spaces.push(i);
+      const cuts = [text.length, ...spaces.reverse()];
+      for (const cut of cuts) {
+        const whole = text.slice(0, cut);
+        // A sentence's closing punctuation is not part of the path, unless the name really ends so.
+        for (const s of new Set([whole.replace(/[.,:;!?]+$/, ''), whole])) if (await isOnDisk(s, cwd)) return s.length;
+      }
+      return 0;
+    }),
+  ),
 );
 
 /** VS Code's command line tool, from the app itself or where its installer links it; null when none is found. */
@@ -2092,7 +2217,11 @@ function createWindow() {
     return { action: 'deny' };
   });
   win.once('ready-to-show', () => (capture ? win?.showInactive() : win?.show()));
-  win.webContents.on('did-finish-load', () => void pollAgents());
+  win.webContents.on('did-finish-load', () => {
+    // A page loaded anew has none of the lists.
+    listsSent.clear();
+    void pollAgents();
+  });
   win.webContents.on('before-input-event', recordKey);
   void win.loadFile(path.join(__dirname, 'index.html'));
 
